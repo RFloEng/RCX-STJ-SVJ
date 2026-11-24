@@ -50,7 +50,7 @@ Details of every script: [`docs/TOOLS.md`](docs/TOOLS.md).
 **No game data and no game code is in this repository**: no executable, textures, models, sounds, tracks or converted files.
 The tools read your own copy of the game, written from observation of the data files and the program's behaviour,
 for interoperability and preservation. Rally Championship is the property of its owners; this project is not affiliated with or
-endorsed by them. No licence has been chosen yet (all rights reserved until the owner adds one).
+endorsed by them. The code in this repository is released under the [MIT licence](LICENSE); it does not cover the game or its data.
 
 ## Credits
 
