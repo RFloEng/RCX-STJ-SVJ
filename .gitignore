@@ -1,0 +1,14 @@
+# Game data: copyrighted, never commit
+/RAL.EXE
+/FILES/
+/ACROREAD/
+/DIRECTX/
+/MANUAL.PDF
+/README.TXT
+/AUTORUN.INF
+# Everything converted from the game
+/export/
+__pycache__/
+*.pyc
+*.blend
+*.blend1
