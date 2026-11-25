@@ -42,7 +42,7 @@ The game copies the header to `0x5ccc94`; records live at `[0x5ccc3c]` (64 bytes
 | `p[0]` | flags. **Low byte `0xFF` = special record** (objects, road-line points); otherwise a terrain quad. Bits 8..15 = *slot* |
 | `p[1..4]` | vertex indices of the quad in "Z" order: the outline is `p1, p2, p4, p3` |
 | `p[5]` | baked shade, 4 bytes (one per corner, LSB first) → exported as vertex colour |
-| `p[6]` | special records: `16` = linked point of a chain (road line / road edge), otherwise the object size (unapplied) |
+| `p[6]` | special records: object size, `16` = natural (scale p6/16); the road-line chains are the marker slots 0x3d/0x3e |
 | `p[2]`,`p[3]`,`p[4]` | special objects: yaw (1/256 turn about +Y), pitch?/roll? (unapplied) |
 | `p[7]` | object height offset, 16.16 |
 | `p[9]` byte 2 | **`1` = first point of the road line, `2` = checkpoint** |
@@ -69,15 +69,15 @@ profiles 0, 1, 2, 3, 7, 8. Profile names/classes are not in the data (tarmac-lik
 
 ```
 
-After loading, the game swaps one tile code on some stages (`0x4398d0`): `0x2f72→0x2fd2` on stages 54/56/61/63/65 and
-`0x2f71→0x2fd1` on 62/64/66 (first match only). The exporter does the same.
+After loading, the game swaps one tile code on some stages (`FUN_0043989a`, which reads the stage number): `0x2f82→0x2fd0` on stages 32/34/36,
+`0x2f91→0x2fe0` on 52/54/56, `0x2f72→0x2fd2` on 61/63/65 and `0x2f71→0x2fd1` on 62/64/66 (first match only, in the 255-entry tile list). The exporter does the same (`TILE_SWAP`).
 
 ### Placed objects
 
 A special record (low byte `0xFF`, `p[6] != 16`) is an object instance: model id = `LOCALDAT dword[320 + slot]`
 (`FILES/A/OBJxxxx.RO3`), position = vertex `p[1]` (+ `p[7]` height), yaw = `p[2]` · 360/256 about +Y. Flat signs end up
 perpendicular to the road with this convention (checked statistically on 582 samples). `p[6]` is the size (16 = natural): scale = `p[6]` / 16 (the game scales the object matrix by size/16, RC2000 decomp).
-Records with `p[6]` = 16 are mostly point chains (`p[9]` low byte 1); those whose `p[9]` low byte is not 1 are objects at natural size.
+Every special record of an object slot (< 0x38) is an object, whatever its `p[6]` or `p[9]`: the RC2000 decompilation draws all kind-0xFF records the same way (`p[9]` low byte = lit by the stage sun, size byte = `p[6]`). The chains are the marker slots 0x3d/0x3e, which link through `p[3]` (9818 of 9821 records in LEVEL61); the 843 `p[6]` = 16 records of object slots never link (0 of 843).
 `p[3]`, `p[4]` are kept in the node's `extras` but not applied.
 
 ### Road line, start, finish, checkpoints, pace notes

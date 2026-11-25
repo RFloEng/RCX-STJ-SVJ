@@ -69,12 +69,22 @@ def page_size(tid):
 
 _PAGE_SIZE = {}
 
+# RAL.EXE FUN_0043989a (reads the stage number at 0x6237d0): after loading, the first tile of the level's list equal to
+# the old code is replaced by the new one (list = LOCALDAT dwords 64..318).  stage -> (old, new)
+TILE_SWAP = {}
+for _stages, _pair in (((32, 34, 36), (0x2f82, 0x2fd0)), ((52, 54, 56), (0x2f91, 0x2fe0)),
+                       ((61, 63, 65), (0x2f72, 0x2fd2)), ((62, 64, 66), (0x2f71, 0x2fd1))):
+    for _s in _stages:
+        TILE_SWAP[_s] = _pair
+
 
 def is_placed_object(p):
-    """Special record (low byte 0xFF) that is an object instance. Records with p6 == 16 are mostly linked point chains
-    (their p9 low byte is 1, p2/p3 are links); a p6 == 16 record whose p9 low byte is not 1 is an object at natural
-    size (same p8/p9 signature as the scaled ones: 0x800000/0x42000000, 0x64800000/0x42006064)."""
-    return p[0] & 0xFF == 0xFF and (p[6] != 16 or (p[9] & 0xFF) != 1)
+    """Special record (low byte 0xFF) that may be an object instance; place_objects then skips the marker slots.
+    The game draws every kind-0xFF record of an object slot as an object, whatever its size or its p9 low byte
+    (RC2000 decomp, draw_described_object.rs: p9 low byte = 'lit by the stage sun', size byte = p6, 16 = natural).
+    The road chains are the marker slots 0x3D/0x3E, which link through p[3] (9818 of 9821 records in LEVEL61);
+    the p6 == 16 records of object slots never do (0 of 843)."""
+    return p[0] & 0xFF == 0xFF
 
 
 def object_scale(p):
@@ -178,8 +188,7 @@ def convert(sq_path, out_dir):
     tiles = list(struct.unpack_from('<256i', local, 64 * 4))
     # 0x4398d0: stage-specific tile substitution done by the game after loading
     stage = int(os.path.basename(os.path.dirname(sq_path))[5:])
-    swap = {54: (0x2f72, 0x2fd2), 56: (0x2f72, 0x2fd2), 61: (0x2f72, 0x2fd2), 63: (0x2f72, 0x2fd2),
-            65: (0x2f72, 0x2fd2), 62: (0x2f71, 0x2fd1), 64: (0x2f71, 0x2fd1), 66: (0x2f71, 0x2fd1)}.get(stage)
+    swap = TILE_SWAP.get(stage)
     if swap and swap[0] in tiles[:255]:
         tiles[tiles.index(swap[0])] = swap[1]
     g = Glb()

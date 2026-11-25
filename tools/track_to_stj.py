@@ -55,7 +55,7 @@ from track import read_track
 import course_ref
 from ro3 import read_ro3
 from ro3_to_glb import pcx_png, orient_polys
-from track_to_glb import FILES, FALLBACK, model_path, is_placed_object, object_scale, page_size
+from track_to_glb import TILE_SWAP, FILES, FALLBACK, model_path, is_placed_object, object_scale, page_size
 
 TOOL, TOOL_VERSION = 'track_to_stj.py', '0.1'
 
@@ -540,8 +540,7 @@ def convert(sq_path, out_dir):
     local = open(os.path.join(os.path.dirname(sq_path), 'LOCALDAT'), 'rb').read()
     tiles = list(struct.unpack_from('<256i', local, 64 * 4))
     stage_no = int(name[5:])
-    swap = {54: (0x2f72, 0x2fd2), 56: (0x2f72, 0x2fd2), 61: (0x2f72, 0x2fd2), 63: (0x2f72, 0x2fd2),
-            65: (0x2f72, 0x2fd2), 62: (0x2f71, 0x2fd1), 64: (0x2f71, 0x2fd1), 66: (0x2f71, 0x2fd1)}.get(stage_no)
+    swap = TILE_SWAP.get(stage_no)
     if swap and swap[0] in tiles[:255]:
         tiles[tiles.index(swap[0])] = swap[1]
 
