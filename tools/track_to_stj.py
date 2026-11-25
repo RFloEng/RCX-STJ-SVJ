@@ -90,6 +90,19 @@ def exe_surface_profiles():
     return out
 
 
+# Stage number (= LEVELnn folder) -> stage name. Hardcoded from the game's own data: the track pack in RAL.EXE (36 rows of 0x40 bytes at
+# VA 0x734b7a; dword 0 = name text id 0x3e8 + i = tokSS_StageNNN in LOCALE/ENGLISH.TXT, dword 13 = stage number) and the capitalisation
+# of the RC2000 decompilation (menu/launch.rs).  Checked against the exe + ENGLISH.TXT: 36/36 equal ignoring case.
+STAGE_NAMES = {
+    21: 'Port Soderick', 22: 'Ballagyr', 23: 'Curraghs', 24: 'Tholt-y-Will', 25: 'Injerbreck', 26: 'Cringle',
+    31: 'Twiglees', 32: 'Yair', 33: 'Cardrona', 34: 'Black Loch', 35: 'Glentrool', 36: 'Ae',
+    41: 'Clocaenog Mid', 42: 'Penmachno South', 43: 'Myherin', 44: 'Hafren', 45: 'Dyfi', 46: 'Gartheiniog',
+    51: "Hamilton's Folly", 52: "Tyrone's Ditches", 53: 'Feeney', 54: 'Parkanaur', 55: 'Lisnamuck', 56: 'Tardree',
+    61: 'Chirdonhead', 62: 'Falstone', 63: 'Kershope', 64: 'Pundershaw', 65: 'Riccarton', 66: 'Newcastleton',
+    71: 'Moon and Star', 72: 'Bothwell', 73: 'Whitchester', 74: 'Eccles', 75: 'Langton', 76: 'Fogo',
+}
+
+
 def stj(v):
     """Game (x, y up, z) -> STJ (x, y, z up)."""
     return (v[0], v[2], v[1])
@@ -459,11 +472,14 @@ def build_document(name, t, road, placed, textures, n_polys, surf_used, keys, en
                              'replay camera zoom and any fixed aim (cameras are listed as tracking; ranges = nearest camera along the road line)',
                              'water (LEVEL03/13 holes, LEVEL05/15 edges: drawn by the game, not in the data)']}]}},
         'track_info': {'name': name, 'type': 'point_to_point', 'primary_surface': 'other'},
+        # the stage's own name (levels 01-06 and 11-16 are not in the table)
         'geometry': {'meshes': [{'id': 'stage', 'uri': '%s.usda' % name, 'roles': ['visual', 'collision'],
                                  'baked': {'vertex_colour': {'primvar': 'displayColor', 'role': 'light'}}}]},
         'surfaces': surfaces_block(surf_used, keys),
         'x_rcx': {'game_unit_is_metre': True, 'object_collision': 'all placed objects marked as collision (estimate: the game decides per object material kind)', 'polygons': n_polys, 'objects': placed, 'environment': env},
     }
+    if int(name[5:]) in STAGE_NAMES:
+        doc['track_info']['name'] = STAGE_NAMES[int(name[5:])]
     if env and env.get('sky_dome'):
         doc.setdefault('environment', {})['sky'] = {'model': 'engine_default', 'x_rcx': env['sky_dome']}
     if mk:
