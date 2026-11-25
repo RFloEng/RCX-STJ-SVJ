@@ -23,7 +23,7 @@ What is written:
   * reference  centerline = the road line (slot 0x3e chain, see course_ref.py; slot 0x3d is the same line walked the
                other way, so there is no width in the data); `s` is the plan length along it (levels 21..76; levels
                01-06 have a 3-record line and 11-16 none, they get no reference)
-  * timing     start s=0, finish s=length, `split_points` from the checkpoint records (byte 0x26 == 2)
+  * timing     start = first check record, finish = last check record, `split_points` = the checks between (byte 0x26 != 0, line records 1..last-1; RC2000 decomp)
   * x_rcx      everything the document has no field for: the pace-note slot bytes with their `s` and direction (forward
                chain, and the reverse chain converted to forward s; code -> speech not decoded), zone open/close
                markers, the object table and the raw record indices
@@ -309,6 +309,8 @@ def pacenote_of(code):
         return ('square', side, None, side + ' square') if k == 5 else                ('hairpin', side, None, side + (' hairpin' if k == 6 else ' tight hairpin'))
     if code == 61:
         return 'straight', None, None, 'straight'
+    if code == 68:      # speech table entry 68 = comment\ohno.wav; stage data: 45 times in LEVEL61, mostly right after "right 4"
+        return 'other', None, None, 'oh no'
     if 20 <= code <= 43:
         name = GENERAL_NAME[code - 20]
         kind = {'bridge': 'bridge', 'caution': 'caution', 'chicane': 'twisty', 'crest': 'crest', 'jump': 'jump',
@@ -494,18 +496,28 @@ def build_document(name, t, road, placed, textures, n_polys, surf_used, keys, en
         pts, s, length = road['pts'], road['s'], road['length']
         doc['reference'] = {'centerline': {'points': [[round(c, 4) for c in p] for p in pts]},
                             'length': round(length, 3)}
-        doc['track_info']['length'] = round(length, 1)
         P = t['polys']
         src_to_s = dict(zip(road['src'], s))
         splits, notes, zones = markers(P, road['chain_a'], src_to_s.get, 'forward')
-        # a checkpoint on the last point is the finish itself (LEVEL01-06 have a 3-point line): not a split
-        splits = [x for x in splits if 0.5 < x['s'] < length - 0.5]
+        # Start, finish and splits as the game does it (RC2000 decomp race/checkpoints.rs, level_init.rs listed_checkpoints,
+        # car_starts.rs start_car): the checks are the line records 1 .. last-1 whose byte 0x26 (p9 byte 2) is not 0; the car
+        # is placed on the first check, the stage ends on the last one and the ones between are the splits.  The chain's
+        # first record (flag 1) and last record are not checks, so the line runs on before the start and after the finish.
+        chain_a = road['chain_a']
+        checks = [(src_to_s[i], i) for i in range(1, len(chain_a) - 1) if i in src_to_s and (P[chain_a[i]][9] >> 16) & 0xFF]
+        if len(checks) >= 2:
+            start_s, finish_s = checks[0][0], checks[-1][0]
+            splits = [{'id': 'cp%d' % (k + 1), 'name': 'checkpoint %d' % (k + 1), 's': round(si, 3)}
+                      for k, (si, _i) in enumerate(checks[1:-1])]
+        else:           # fewer than two checks (LEVEL01-06): the game lists none; the line ends stand in
+            start_s, finish_s, splits = 0.0, length, []
+        doc['track_info']['length'] = round(finish_s - start_s, 1)
         sb = road['s_b']
         if sb and sb[-1] > 0:      # reverse direction: s_forward = L - s along the reversed chain
             _sp, notes_r, zones_r = markers(P, road['chain_b'], lambda i: max(0.0, length - sb[i] * length / sb[-1]),
                                             'reverse')
             notes, zones = notes + notes_r, zones + zones_r
-        doc['timing'] = {'start': {'s': 0.0}, 'finish': {'s': round(length, 3)}}
+        doc['timing'] = {'start': {'s': round(start_s, 3)}, 'finish': {'s': round(finish_s, 3)}}
         if splits:
             doc['timing']['split_points'] = splits
         pn = pacenotes_block(notes)
