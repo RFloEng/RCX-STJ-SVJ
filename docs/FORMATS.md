@@ -55,7 +55,10 @@ The game copies the header to `0x5ccc94`; records live at `[0x5ccc3c]` (64 bytes
 slot = (flags >> 8) & 0xFF
 code = LOCALDAT dword[64 + slot]            tile code of the stage (255 entries)
 file = FILES/A/TX{code >> 4 :04d}.PCX
-UVs  = FILES/A/TEXTINFO record `code` (128 bytes): dwords 0..3 are the corner UVs, lo16 = u, hi16 = v over 256x256
+UVs  = FILES/A/TEXTINFO record `code` (128 bytes): dwords 0..3 are the corner UVs, lo16 = u, hi16 = v, 16.8 fixed point in
+       PIXELS of the page itself (value >> 8 = pixel): fraction = value / 256 / page size. Pages are 128x128 (320 of 605) or
+       256x256, so 0x7FFF is the edge of a 128 page; values past it repeat (RC2000 decomp: texture_coordinates).
+       Group 0 (code < 16) has no file: the game draws those polygons with no texture, vertex colour only.
 
 Surface per tile (found statically in `RAL.EXE`): the same TEXTINFO record carries physics attributes. `0x439137` copies
 them into a 256-slot table (`0x979eb0`, 0x40 bytes per slot; slot byte `+0x10` = TEXTINFO byte `+0x20`, `+0x14` = `+0x10`,
@@ -73,8 +76,9 @@ After loading, the game swaps one tile code on some stages (`0x4398d0`): `0x2f72
 
 A special record (low byte `0xFF`, `p[6] != 16`) is an object instance: model id = `LOCALDAT dword[320 + slot]`
 (`FILES/A/OBJxxxx.RO3`), position = vertex `p[1]` (+ `p[7]` height), yaw = `p[2]` · 360/256 about +Y. Flat signs end up
-perpendicular to the road with this convention (checked statistically on 582 samples). `p[3]`, `p[4]`, `p[6]` are kept in
-the node's `extras` but not applied.
+perpendicular to the road with this convention (checked statistically on 582 samples). `p[6]` is the size (16 = natural): scale = `p[6]` / 16 (the game scales the object matrix by size/16, RC2000 decomp).
+Records with `p[6]` = 16 are mostly point chains (`p[9]` low byte 1); those whose `p[9]` low byte is not 1 are objects at natural size.
+`p[3]`, `p[4]` are kept in the node's `extras` but not applied.
 
 ### Road line, start, finish, checkpoints, pace notes
 

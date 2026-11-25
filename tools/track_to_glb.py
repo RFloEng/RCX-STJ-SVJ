@@ -53,6 +53,35 @@ def model_path(m):
     return None
 
 
+def page_size(tid):
+    """(width, height) in pixels of terrain texture page TXnnnn.PCX: 128 or 256 (320 for one), 256 when the file is missing.
+    TEXTINFO corner values are 16.8 pixel coordinates (value >> 8 = pixel) in the page's own pixels, so the UV is
+    value / 256 / size -- the 128-pixel pages are covered by 0..0x7FFF, not 0..0xFFFF."""
+    if tid not in _PAGE_SIZE:
+        path = os.path.join(FILES, 'A', 'TX%04d.PCX' % tid)
+        try:
+            from PIL import Image
+            _PAGE_SIZE[tid] = Image.open(path).size
+        except OSError:
+            _PAGE_SIZE[tid] = (256, 256)
+    return _PAGE_SIZE[tid]
+
+
+_PAGE_SIZE = {}
+
+
+def is_placed_object(p):
+    """Special record (low byte 0xFF) that is an object instance. Records with p6 == 16 are mostly linked point chains
+    (their p9 low byte is 1, p2/p3 are links); a p6 == 16 record whose p9 low byte is not 1 is an object at natural
+    size (same p8/p9 signature as the scaled ones: 0x800000/0x42000000, 0x64800000/0x42006064)."""
+    return p[0] & 0xFF == 0xFF and (p[6] != 16 or (p[9] & 0xFF) != 1)
+
+
+def object_scale(p):
+    """p6 is the object's size, 16 = natural (the game scales the object matrix by size / 16, RC2000 decomp)."""
+    return p[6] / 16.0 if p[6] > 0 else 1.0
+
+
 def place_objects(g, t, vs, local):
     """Special polygon records (flags low byte 0xFF, p6 != 16) are object instances:
     slot = (flags >> 8) & 0xFF (< 64) -> model id = LOCALDAT dword[320 + slot]
@@ -60,16 +89,15 @@ def place_objects(g, t, vs, local):
     position = vertex p1 (+ p7 as a 16.16 height offset); p2 = yaw in 1/256 turns.
     Yaw sign/scale verified statistically: flat signs/banners (models 52, 91, 92, 94,
     149) end up perpendicular to the road line in 582 samples (circular R=0.64 for
-    this convention, none for the others). p3/p4 (pitch/roll?) and p6 (size?) are
-    kept in node extras but not applied.
-    Records with p6 == 16 are linked point chains (road edge lines), not objects."""
+    this convention, none for the others). p3/p4 (pitch/roll?) are kept in node extras but not applied;
+    p6 is the size, scale = p6 / 16 (see object_scale / is_placed_object)."""
     ld = struct.unpack_from('<%di' % (len(local) // 4), local, 0)
     placed = 0
     for p in t['polys']:
-        if p[0] & 0xFF != 0xFF or p[6] == 16 or p[1] >= len(vs):
+        if not is_placed_object(p) or p[1] >= len(vs):
             continue
         slot = (p[0] >> 8) & 0xFF
-        if slot >= 64:
+        if slot >= 64 or (slot >= 0x38 and p[6] == 16):
             continue
         m = ld[320 + slot]
         path = model_path(m)
@@ -83,6 +111,7 @@ def place_objects(g, t, vs, local):
         ang = math.radians(p[2] * 360.0 / 256.0)   # +Y rotation in glTF (game is left-handed, z negated)
         node = {'name': 'OBJ%04d' % m, 'translation': [x, y + dy, z],
                 'rotation': [0.0, math.sin(ang / 2), 0.0, math.cos(ang / 2)],
+                'scale': [object_scale(p)] * 3,
                 'extras': {'model': m, 'p2': p[2], 'p3': p[3], 'p4': p[4], 'size': p[6]}}
         if len(parts) == 1:
             node['mesh'] = parts[0][1]
@@ -163,14 +192,16 @@ def convert(sq_path, out_dir):
         c = struct.unpack_from('<4I', textinfo, code * 128) if 0 <= code < 16000 else (0,) * 4
         if not any(c):    # tile code without a TEXTINFO record: use the full texture as a unit quad
             c = (0x00000000, 0x0000FFFF, 0xFFFF0000, 0xFFFFFFFF)
-        uv = [((w & 0xFFFF) / 65535.0, (w >> 16) / 65535.0) for w in c]
+        uv = [((w & 0xFFFF) / 256.0, (w >> 16) / 256.0) for w in c]   # pixels; divided by the page size below
         shade = [((p[5] >> (8 * k)) & 255) / 255.0 for k in range(4)]
         groups.setdefault(code >> 4, []).append((p[1:5], uv, shade))
     for tid, quads in sorted(groups.items()):
         path = os.path.join(FILES, 'A', 'TX%04d.PCX' % tid)
         tex = g.texture(path)[0] if os.path.exists(path) else None
         pos = bytearray(); uvb = bytearray(); col = bytearray(); n = 0
+        pw, ph = page_size(tid)
         for idx, uv, sh in quads:
+            uv = [(u / pw, v / ph) for u, v in uv]
             # quad corners are in 'Z' order (p1,p2,p3,p4 -> outline p1,p2,p4,p3): two triangles on that outline
             for tri in ((0, 1, 3), (0, 3, 2)):          # outline a,b,d,c
                 for k in tri:
@@ -185,9 +216,10 @@ def convert(sq_path, out_dir):
                  'COLOR_0': g.acc(bytes(col), 5126, n, 'VEC3', 34962)}
         if tex is not None:
             attrs['TEXCOORD_0'] = g.acc(bytes(uvb), 5126, n, 'VEC2', 34962)
-        name = 'TX%04d' % tid if tex is not None else 'missing_TX%04d' % tid
+        # group 0 has no file by design: the game draws it with no texture (vertex colour only)
+        name = 'TX%04d' % tid if tex is not None else ('untextured' if tid == 0 else 'missing_TX%04d' % tid)
         g.meshes.append({'name': name, 'primitives': [{
-            'attributes': attrs, 'material': g.material(name, tex, FALLBACK)}]})
+            'attributes': attrs, 'material': g.material(name, tex, (1.0, 1.0, 1.0) if tid == 0 else FALLBACK)}]})
         g.nodes.append({'name': name, 'mesh': len(g.meshes) - 1})
     placed = place_objects(g, t, vs, local)      # OBJnnnn nodes (instanced geometry, cached per model)
     markers = place_markers(g, sq_path, t, vs)

@@ -38,7 +38,7 @@ Ideas / TODO:
     table of 1 (not a driving surface?), 1 has the highest grip (tarmac-like), 9 the lowest.
   * Pace notes: when the code -> call mapping is decoded, write `race.pacenotes.notes[]` (call, kind, direction,
     severity) instead of `x_rcx.pace_notes`.
-  * Object pitch/roll/scale (p3/p4/p6) are in x_rcx but not applied (same as the GLB).
+  * Object size p6 (16 = natural) is applied as scale p6/16; pitch/roll (p3/p4) are in x_rcx but not applied.
   * `scenery.prototypes/instances` could describe the objects in the document; for now they only exist as USD prims.
   * A .usdz package: `python tools/stj_usd.py package` from the STJ repository.
 """
@@ -55,7 +55,7 @@ from track import read_track
 import course_ref
 from ro3 import read_ro3
 from ro3_to_glb import pcx_png, orient_polys
-from track_to_glb import FILES, FALLBACK, model_path
+from track_to_glb import FILES, FALLBACK, model_path, is_placed_object, object_scale, page_size
 
 TOOL, TOOL_VERSION = 'track_to_stj.py', '0.1'
 
@@ -125,7 +125,7 @@ class Mats:
         self.cache = {}
         UsdGeom.Scope.Define(stage, '/track/materials')
 
-    def get(self, name, tex_rel, alpha):
+    def get(self, name, tex_rel, alpha, colour=FALLBACK):
         if name in self.cache:
             return self.cache[name]
         mat = UsdShade.Material.Define(self.stage, '/track/materials/' + name)
@@ -154,7 +154,7 @@ class Mats:
                 sh.CreateInput('opacity', Sdf.ValueTypeNames.Float).ConnectToSource(tx.GetOutput('a'))
                 sh.CreateInput('opacityThreshold', Sdf.ValueTypeNames.Float).Set(0.5)
         else:
-            sh.CreateInput('diffuseColor', Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*FALLBACK))
+            sh.CreateInput('diffuseColor', Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*colour))
         sh.CreateOutput('surface', Sdf.ValueTypeNames.Token)
         mat.CreateSurfaceOutput().ConnectToSource(sh.GetOutput('surface'))
         self.cache[name] = mat
@@ -455,7 +455,7 @@ def build_document(name, t, road, placed, textures, n_polys, surf_used, keys, en
                     'format': 'RCX level (RAL.EXE)', 'tool': TOOL, 'tool_version': TOOL_VERSION, 'source': name,
                     'lost': ['road width (the road line has no width in the level files)',
                                                           'pace-note codes outside corners/general calls (counts, distances, comments; kept in x_rcx.pace_notes)',
-                             'object pitch, roll and scale (kept in x_rcx.objects)',
+                             'object pitch and roll (kept in x_rcx.objects)',
                              'replay camera zoom and any fixed aim (cameras are listed as tracking; ranges = nearest camera along the road line)',
                              'water (LEVEL03/13 holes, LEVEL05/15 edges: drawn by the game, not in the data)']}]}},
         'track_info': {'name': name, 'type': 'point_to_point', 'primary_surface': 'other'},
@@ -563,7 +563,7 @@ def convert(sq_path, out_dir):
         c = struct.unpack_from('<4I', textinfo, code * 128) if 0 <= code < 16000 else (0,) * 4
         if not any(c):
             c = (0x00000000, 0x0000FFFF, 0xFFFF0000, 0xFFFFFFFF)
-        uv = [((w & 0xFFFF) / 65535.0, (w >> 16) / 65535.0) for w in c]
+        uv = [((w & 0xFFFF) / 256.0, (w >> 16) / 256.0) for w in c]   # pixels; divided by the page size below
         shade = [((p[5] >> (8 * k)) & 255) / 255.0 for k in range(4)]
         # surface profile: low byte of TEXTINFO+0x20 (slot byte +0x10); polygons flagged 0x1000 use profile 5
         surf = textinfo[code * 128 + 0x20] if 0 <= code < 16000 else 0
@@ -575,12 +575,19 @@ def convert(sq_path, out_dir):
         surf_used[sf] = surf_used.get(sf, 0) + len(quads)
         rel = tex.get(os.path.join(FILES, 'A', 'TX%04d.PCX' % tid))
         corners, colours = [], []
+        pw, ph = page_size(tid)
         for idx, uv, sh in quads:
+            uv = [(u / pw, v / ph) for u, v in uv]
             for tri in ((0, 3, 1), (0, 2, 3)):      # counter-clockwise seen from +Z: the normal (right-handed) points up
                 for k in tri:
                     corners.append((vs[idx[k]], uv[k]))
                     colours.append(sh[k])
-        mat = mats.get('TX%04d' % tid if rel else 'missing_TX%04d' % tid, rel, alpha=True)
+        if tid == 0:
+            # texture group 0 is never a file (there is no TX0000.PCX): the game draws these polygons with no texture, the
+            # vertex colour only (RC2000 decomp: scene::choose_texture -> NO_TEXTURE); in LEVEL61 they are the power cables
+            mat = mats.get('untextured', None, alpha=False, colour=(1.0, 1.0, 1.0))
+        else:
+            mat = mats.get('TX%04d' % tid if rel else 'missing_TX%04d' % tid, rel, alpha=True)
         write_mesh(stage, '/track/ground/TX%04d_S%d' % (tid, sf), corners, mat, colours=colours)
 
     # --- placed objects (see track_to_glb.place_objects) -------------------------------------------------------
@@ -592,10 +599,10 @@ def convert(sq_path, out_dir):
     objs.GetPrim().CreateAttribute('stj:collision', Sdf.ValueTypeNames.Bool, custom=True).Set(True)
     protos, placed, counts = {}, [], {}
     for p in t['polys']:
-        if p[0] & 0xFF != 0xFF or p[6] == 16 or p[1] >= len(vs):
+        if not is_placed_object(p) or p[1] >= len(vs):
             continue
         slot = (p[0] >> 8) & 0xFF
-        if slot >= 64:
+        if slot >= 64 or (slot >= 0x38 and p[6] == 16):
             continue
         m = ld[320 + slot]
         path = model_path(m)
@@ -613,6 +620,8 @@ def convert(sq_path, out_dir):
         inst.GetPrim().SetInstanceable(True)
         inst.AddTranslateOp().Set(Gf.Vec3d(x, y, z + dz))
         inst.AddRotateZOp().Set(p[2] * 360.0 / 256.0)
+        sc = object_scale(p)
+        inst.AddScaleOp().Set(Gf.Vec3f(sc, sc, sc))
         placed.append({'prim': '/track/objects/%s_%d' % (pname, k), 'model': m, 'p2': p[2], 'p3': p[3], 'p4': p[4],
                        'size': p[6]})
     # --- sky: scene object 1 = the model in LOCALDAT[321] (a 3 m dome with 7 sky textures), drawn by the game around the
