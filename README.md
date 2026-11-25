@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logoRCX.svg" alt="RCX to STJ / SVJ" width="200">
+</p>
+
 # RCX to STJ / SVJ
 
 Converters that turn the data of **Rally Championship Xtreme** (Magnetic Fields / Europress, 1999, European release,
