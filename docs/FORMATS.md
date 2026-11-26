@@ -103,6 +103,11 @@ line (15–28 m) and 11–16 none. From the code (`0x45a718` "init checkpoints",
   31 straight, 32..41 distances and "into", 47..73 suffixes and features (52 over, 55 past, 65 crest, 68 junction),
   80..83 comments; 84 or more ends the group ("invalid pace data"). Check: 165 of the 167 hand-placed corner cues on a bend of
   30° or more turn the same way as the road.
+* **On-screen arrow.** Each called cue below 32 is also looked up in the table at `0x614bfc` (code `0x4416e4`; identical to the
+  RC2000 decompilation's listed events): 17..24 → symbols 0..7 (right 1..5, square, hairpin, tight hairpin), 1..8 → 8..15 (the same
+  to the left), long 9..13 / 25..29 → the arrows of 1..5; the other cues have none. The HUD draws the symbol with rectangle
+  `0x933b10 + 16·symbol` of `FILES/B/TX1800.PCX`; 8..15 have a negative width (mirrored). Arrows go from green (1) to red (tight
+  hairpin). All 4332 converted notes that have an arrow match it in side and grade; the 577 without one have no direction.
 * Slots `0x3c` and `0x38` hold markers whose purpose is unknown.
 * Replay cameras: marker polygons with slot 0x38 / 0x3C (position = first vertex; orientation and range not decoded). Lamps are slot 0x3B, sound spots 0x3F (`p[2]` = sound id). Layout cross-checked with the RC2000 decompilation (sibling game, same engine; github.com/Diatosta/rc2k_decomp, GPL-3.0 — only format facts were used, no code).end markers.
 
