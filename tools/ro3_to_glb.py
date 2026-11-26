@@ -121,6 +121,12 @@ class Glb:
         if path in self.tex_by_id:
             return self.tex_by_id[path]
         png, size = pcx_png(path)
+        return self.texture_png(path, png, size)
+
+    def texture_png(self, path, png, size):
+        """The same for a picture already in memory; `path` is only the cache key."""
+        if path in self.tex_by_id:
+            return self.tex_by_id[path]
         self.images.append({'bufferView': self.view(png), 'mimeType': 'image/png'})
         self.textures.append({'source': len(self.images) - 1, 'sampler': 0})
         self.tex_by_id[path] = (len(self.textures) - 1, size)

@@ -39,8 +39,10 @@ The game copies the header to `0x5ccc94`; records live at `[0x5ccc3c]` (64 bytes
 
 | dword | meaning |
 |---|---|
-| `p[0]` | flags. **Low byte `0xFF` = special record** (objects, road-line points); otherwise a terrain quad. Bits 8..15 = *slot* |
-| `p[1..4]` | vertex indices of the quad in "Z" order: the outline is `p1, p2, p4, p3` |
+| `p[0]` | byte 0 = kind (**`0xFF` = special record**: objects, road-line points; below `0x10` = terrain quad: bits 0..2 = texture orientation, bit 3 = has a back side); byte 1 = tile *slot*; bits 16..31 = face flags (`0x80` = not ground, `0x400`/`0x800` = wall bits) |
+| `p[1..4]` | vertex indices of the quad in "Z" order: the outline is `p1, p2, p4, p3`; the game's triangles are `(p1, p2, p3)` and `(p4, p3, p2)` |
+| `p[8]` bytes 0, 1 | second texture layer: orientation and tile slot (0 = no second layer) |
+| bytes `0x22..0x25` | weight of the second layer at each corner, 0..255 |
 | `p[5]` | baked shade, 4 bytes (one per corner, LSB first) → exported as vertex colour |
 | `p[6]` | special records: object size, `16` = natural (scale p6/16); the road-line chains are the marker slots 0x3d/0x3e |
 | `p[2]`,`p[3]`,`p[4]` | special objects: yaw (1/256 turn about +Y), pitch?/roll? (unapplied) |
@@ -51,8 +53,37 @@ The game copies the header to `0x5ccc94`; records live at `[0x5ccc3c]` (64 bytes
 
 ### Texturing (terrain)
 
+A face has up to **two texture layers** (A: bytes 0, 1; B: bytes `0x20`, `0x21`). Each layer has its own tile slot and
+orientation `o = kind & 7`: corner `k` takes TEXTINFO corner word `ORDER[o][k]`, with
+`ORDER = 0123, 1032, 2301, 3210, 2031, 3120, 0213, 1302` (RC2000 decomp `view_store.rs`, `course_faces.rs`; checked on
+the "MARINE DRIVE" gate of LEVEL21). Only A: A. Only B: B, with the corner weights as its opacity. Both: A, then B over
+it, weighted by B's texture alpha x corner weight.
+
+**How B goes over** is chosen by B's tile: TEXTINFO byte `0x24` indexes the table `3, 5, 4, 0` (`0x63d950`; read at
+`0x4529fd`); the D3D states of each mode are set in `0x44b7ba`:
+
+| byte `0x24` | mode | D3D blend | result (A = lit first layer) | faces (all level files) |
+|---|---|---|---|---|
+| 0 | 3 alpha | SRCALPHA / INVSRCALPHA | `A*(1-w) + B*w` | most (road patches, verges, kerbs) |
+| 1 | 5 gloss | ZERO / INVSRCCOLOR | `A*(1 - B*w)`: B darkens by its own colour (snow shadows, TX588) | 17098 over A, 1334 alone (36 stages) |
+| 2 | 4 additive | SRCALPHA / ONE | `A + B*w` (water, TX440) | 203 over A, 3473 alone (36 stages) |
+
+In mode 3 only, when all four weights are 255 and TEXTINFO byte `0x26` of B's tile is 0, A is not drawn at all
+(`0x44b6dd`). Bit 0 of byte `0x26` also puts a face in the see-through draw bucket (`0x454fec`).
+
+**Mapping by position**: TEXTINFO byte `0x25`, signed, greater than 0 (either layer; `0x452ff5`, `0x45322d`; same in the
+RC2000 decomp): the corner UVs do not come from the tile but from the corner's position, page fraction =
+`(x, z) * 2^((byte & 3) + 2) / 256`, less the whole pages of corner 0. With the value 1 (all grass tiles of TX363/364/377)
+the picture repeats every 32 m.
+
+`tools/course_tiles.py` does this for both exporters and bakes each distinct blended tile into an atlas page
+(`blend64_*`, `blend128_*`, `blend256_*`), interpolating per game triangle. Over a first layer the bake is exact (distance
+fog aside). **Not reproduced**: B alone in mode 5 or 4 darkens or lights whatever is behind it, which a material with a
+cut-out alpha cannot do; those faces are drawn as B's own picture. None of this has been compared with a screenshot of
+the running game.
+
 ```
-slot = (flags >> 8) & 0xFF
+slot = byte 1 (layer A) or byte 0x21 (layer B)
 code = LOCALDAT dword[64 + slot]            tile code of the stage (255 entries)
 file = FILES/A/TX{code >> 4 :04d}.PCX
 UVs  = FILES/A/TEXTINFO record `code` (128 bytes): dwords 0..3 are the corner UVs, lo16 = u, hi16 = v, 16.8 fixed point in
@@ -69,6 +100,18 @@ profiles 0, 1, 2, 3, 7, 8. Profile names/classes are not in the data (tarmac-lik
 
 ```
 
+### What the car collides with
+
+* The wheels and body points look for ground only on faces with kind `< 0x10` and **flag `0x80` clear** (RC2000 decomp
+  `physics/probe_ground.rs`, `ground_search.rs`); where that ground ends, the car is stopped. Walls inside it are
+  faces whose `0x400` / `0x800` bits meet (`physics/wall_contacts.rs`). Terrain geometry is never tested as geometry;
+  placed objects are (`face_contact.rs`, by the object's material kind).
+* 99% of the standing faces are flagged `0x80`. For engines that collide with every triangle, `track_to_stj.py` moves to
+  a visual-only file (`LEVELnn_cards.usda`) the faces that are flagged `0x80`, stand steeper than 80 degrees, have no
+  edge on the border of the ground and are less than 85% solid (the last two limits are the tool's choice): overhanging
+  leaves and bushes that were invisible barriers. LEVEL21: see-through terrain triangles within 3 m of the road line at
+  car height drop from 626 to 2.
+
 After loading, the game swaps one tile code on some stages (`FUN_0043989a`, which reads the stage number): `0x2f82→0x2fd0` on stages 32/34/36,
 `0x2f91→0x2fe0` on 52/54/56, `0x2f72→0x2fd2` on 61/63/65 and `0x2f71→0x2fd1` on 62/64/66 (first match only, in the 255-entry tile list). The exporter does the same (`TILE_SWAP`).
 
@@ -79,6 +122,31 @@ A special record (low byte `0xFF`, `p[6] != 16`) is an object instance: model id
 perpendicular to the road with this convention (checked statistically on 582 samples). `p[6]` is the size (16 = natural): scale = `p[6]` / 16 (the game scales the object matrix by size/16, RC2000 decomp).
 Every special record of an object slot (< 0x38) is an object, whatever its `p[6]` or `p[9]`: the RC2000 decompilation draws all kind-0xFF records the same way (`p[9]` low byte = lit by the stage sun, size byte = `p[6]`). The chains are the marker slots 0x3d/0x3e, which link through `p[3]` (9818 of 9821 records in LEVEL61); the 843 `p[6]` = 16 records of object slots never link (0 of 843).
 `p[3]`, `p[4]` are kept in the node's `extras` but not applied.
+
+#### What the car feels when it touches an object
+
+From the RC2000 decomp (`physics/face_contact.rs`, `physics/face_contacts.rs`, `drive/lit_faces.rs`,
+`drive/animate_lit_faces.rs`, `scene/draw_described_object.rs`); not re-checked in RAL.EXE. Each model has a 128-byte
+record (`FILES/A/OBJSINFO`, models 0..399; `FILES/B/CARSINFO`, 400..599) whose byte `0x1C` is the contact type:
+
+| type | models in these (looked at in renders) | tested | effect | STJ `collision` |
+|---|---|---|---|---|
+| 1 | trees (all 21) | the object's own point | solid; wobbles ±4° for 24 steps | `trunk` |
+| 10 | poles, a lamp post | own point | solid | `trunk` |
+| 5, 6, 9 | mixed (photographers, signs, ...; not all looked at) | own point and mesh points | solid (9 also wobbles) | `mesh` |
+| 2 | bushes and small shrubs | own point | passes through; leans to 67.5° and stays | `none` |
+| 3, 8 | flags and Mobil 1 boards; a barrier | own point (8 also mesh) | passes through; turns, falls flat and stays | `none` |
+| 4 | cone, bale, barrel, bench | own point | passes through; slides away along the ground | `none` |
+| 7 | low scrub | own point | passes through; sound | `none` |
+| 0 | a light flare, two others | | nothing | `none` |
+
+A placement is never tried when bit 0 of its record's byte `0x25` is set or its slot is ≥ `0x38` and not `0x3A`; when
+bits 1..2 are not 0 it is tried in one direction only (value − 1; direction 0 is the forward line, slot `0x3E`).
+`track_to_stj.py` (`object_contacts.py`) writes `scenery.prototypes` (`obj0015`, with `_off` / `_rev` for switched-off
+placements) and one USD `instances` set per prototype, and puts `stj:collision` only on the instances of `mesh`
+prototypes. No `physics` is written: STJ requires a mass for moving props and none was found; the reaction is in the
+prototype's `x_rcx`. The trunk radius (0.25 m) is an estimate, the game tests a point. The classes come from looking at
+the renders; the mixed types are `other`.
 
 ### Road line, start, finish, checkpoints, pace notes
 
@@ -170,7 +238,11 @@ inferred from stage lengths, snow, and the descriptions (tens digit 4 → Wales,
   nodes `OBJnnnn` (geometry shared per model); `ROADLINE_L/R` are line strips; `START_*`, `FINISH_*`, `CHECKPOINT_*`,
   `ZONE_OPEN_*`, `ZONE_CLOSE_*`, `MARK98_*`, `NOTEnn_*` are empty nodes on the road line (suffix `_L|_R_<index>`), with the
   raw bytes in `extras`.
-* Holes in stages 03/13 and ragged edges in 05/15 are real gaps in the data; no water plane is generated.
+* Holes in stages 03/13 and ragged edges in 05/15 are real gaps in the data; no water plane is generated there.
+* Sea: no sea geometry exists; it is painted on the lower half of the sky dome (pages 373..375, LEVEL21 and LEVEL22).
+  `track_to_stj.py` gives Port Soderick (LEVEL21) a `water.bodies` sea with its own surface file: the coast is the
+  fading foot of the Marine Drive cliff (page 520), the side is the dome's open water; **its level (1 m under the lowest
+  vertex) and depth are estimates**. Ballagyr (LEVEL22) has no coast in its geometry and gets none.
 * `tools/name_exports.py` copies everything to `export/glb_named/{tracks,cars,objects_A,objects_S}` with readable names and
   writes `NAMES.csv` (source → named file).
 

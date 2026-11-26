@@ -22,6 +22,7 @@ Coordinates: game space is left-handed, so Z is negated for glTF everywhere (the
 Ideas / TODO for later work:
   * Object pitch/roll (p3/p4) and scale (p6) are kept in node 'extras' but NOT applied yet; find out their
     meaning from the object draw routine before applying them.
+  * Terrain textures: two layers per face, see course_tiles.py.
   * Water: LEVEL03/13 have holes and LEVEL05/15 jagged edges where the game draws water/sea; no water
     plane is generated on purpose (not found in the data, probably a separate effect).
   * Terrain is split per texture page; to get one mesh per surface type or per road section, group by
@@ -30,12 +31,14 @@ Ideas / TODO for later work:
     the spoken instruction (left4, right1 ...).
   * Replay camera positions are the marker polygons with slot 0x38 / 0x3C (see track_to_stj.py).
 """
+import io
 import os
 import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from track import read_track
+import course_tiles
 import math
 from ro3_to_glb import Glb, add_model
 
@@ -192,27 +195,39 @@ def convert(sq_path, out_dir):
     if swap and swap[0] in tiles[:255]:
         tiles[tiles.index(swap[0])] = swap[1]
     g = Glb()
-    groups = {}   # texture page -> list of (corner vertex indices, corner UVs, corner shades)
+    groups = {}   # texture page (number, or baked page name) -> list of (corner vertex indices, corner UVs 0..1, shades)
+    atlas = course_tiles.Atlas(course_tiles.Pages(os.path.join(FILES, 'A')))
     for p in t['polys']:
         # skip special records (0xFF low byte = objects / road-line points) and degenerate vertex refs
         if p[0] & 0xFF == 0xFF or p[6] == 16 or max(p[1:5]) >= len(vs):
             continue
-        code = tiles[(p[0] >> 8) & 0xFF]
-        c = struct.unpack_from('<4I', textinfo, code * 128) if 0 <= code < 16000 else (0,) * 4
-        if not any(c):    # tile code without a TEXTINFO record: use the full texture as a unit quad
-            c = (0x00000000, 0x0000FFFF, 0xFFFF0000, 0xFFFFFFFF)
-        uv = [((w & 0xFFFF) / 256.0, (w >> 16) / 256.0) for w in c]   # pixels; divided by the page size below
+        a, b, weights, mode = course_tiles.face_layers(p, tiles, textinfo, t['verts'])    # one or two layers
+        if not a and not b:
+            continue
+        baked = atlas.add(a, b, weights, mode) if course_tiles.needs_bake(a, b, weights, mode) else None
+        if baked:
+            key, uv = baked
+        else:
+            layer = a or b
+            pw, ph = page_size(layer[0] >> 4)
+            key, uv = layer[0] >> 4, [(u / pw, v / ph) for u, v in layer[1]]
         shade = [((p[5] >> (8 * k)) & 255) / 255.0 for k in range(4)]
-        groups.setdefault(code >> 4, []).append((p[1:5], uv, shade))
-    for tid, quads in sorted(groups.items()):
-        path = os.path.join(FILES, 'A', 'TX%04d.PCX' % tid)
-        tex = g.texture(path)[0] if os.path.exists(path) else None
+        groups.setdefault(key, []).append((p[1:5], uv, shade))
+    baked_tex = {}
+    for name, image in atlas.images():
+        data = io.BytesIO()
+        image.save(data, 'PNG')
+        baked_tex[name] = g.texture_png(name, data.getvalue(), image.size)[0]
+    for tid, quads in sorted(groups.items(), key=lambda kv: str(kv[0]).zfill(12)):
+        if tid in baked_tex:
+            tex = baked_tex[tid]
+        else:
+            path = os.path.join(FILES, 'A', 'TX%04d.PCX' % tid)
+            tex = g.texture(path)[0] if os.path.exists(path) else None
         pos = bytearray(); uvb = bytearray(); col = bytearray(); n = 0
-        pw, ph = page_size(tid)
         for idx, uv, sh in quads:
-            uv = [(u / pw, v / ph) for u, v in uv]
-            # quad corners are in 'Z' order (p1,p2,p3,p4 -> outline p1,p2,p4,p3): two triangles on that outline
-            for tri in ((0, 1, 3), (0, 3, 2)):          # outline a,b,d,c
+            # quad corners are in 'Z' order (outline p1,p2,p4,p3); the game's triangles are (0,1,2) and (3,2,1)
+            for tri in ((0, 1, 2), (3, 2, 1)):
                 for k in tri:
                     pos += struct.pack('<3f', *vs[idx[k]])
                     uvb += struct.pack('<2f', *uv[k])
@@ -226,7 +241,7 @@ def convert(sq_path, out_dir):
         if tex is not None:
             attrs['TEXCOORD_0'] = g.acc(bytes(uvb), 5126, n, 'VEC2', 34962)
         # group 0 has no file by design: the game draws it with no texture (vertex colour only)
-        name = 'TX%04d' % tid if tex is not None else ('untextured' if tid == 0 else 'missing_TX%04d' % tid)
+        name = tid if tid in baked_tex else 'TX%04d' % tid if tex is not None else ('untextured' if tid == 0 else 'missing_TX%04d' % tid)
         g.meshes.append({'name': name, 'primitives': [{
             'attributes': attrs, 'material': g.material(name, tex, (1.0, 1.0, 1.0) if tid == 0 else FALLBACK)}]})
         g.nodes.append({'name': name, 'mesh': len(g.meshes) - 1})

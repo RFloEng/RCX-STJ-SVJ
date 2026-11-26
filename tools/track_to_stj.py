@@ -16,8 +16,15 @@ Frame (spec 4.3):  the game is left-handed with Y up; STJ is right-handed with Z
 What is written:
   * geometry   /track/ground/TXnnnn     terrain, one Mesh per texture page; visual AND collision (`stj:collision`
                                          on /track/ground, doubleSided = true because the game collides both sides)
+               /track/ground/blend*      faces with two texture layers (or one faded one), baked into atlas pages
+                                         (course_tiles.py: each layer's orientation, the weights per corner)
+               LEVELnn_cards.usda        second mesh file, role `visual` only: cut-out standing panels (leaves, bushes)
+                                         that the game's car can never hit; solid they are invisible barriers
+               LEVEL21_water.usda        the sea of Port Soderick as `water.bodies` + its surface (SEA: an estimate)
                /track/prototypes/OBJnnnn  object models (placed through USD native instancing)
-               /track/objects/OBJnnnn_k   placed objects (signs, trees, buildings...) with their yaw
+               /track/objects/<proto>/    placed objects (signs, trees, buildings...) with their yaw, grouped by
+                                          prototype; `stj:collision` only on the instances that are solid by mesh
+  * scenery    `prototypes` (what a vehicle hits: object_contacts.py) and one USD `instances` set per prototype
                materials: UsdPreviewSurface + UsdUVTexture (nearest filter like the game); the baked light is the
                `displayColor` primvar and is declared `baked.vertex_colour` (role light), not multiplied into the albedo
   * reference  centerline = the road line (slot 0x3e chain, see course_ref.py; slot 0x3d is the same line walked the
@@ -38,7 +45,6 @@ Ideas / TODO:
     RAL.EXE into x_rcx; the class stays 'other' because the profiles carry no name.  Profile 0 and 13 have a grip
     table of 1 (not a driving surface?), 1 has the highest grip (tarmac-like), 9 the lowest.
   * Object size p6 (16 = natural) is applied as scale p6/16; pitch/roll (p3/p4) are in x_rcx but not applied.
-  * `scenery.prototypes/instances` could describe the objects in the document; for now they only exist as USD prims.
   * A .usdz package: `python tools/stj_usd.py package` from the STJ repository.
 """
 import json
@@ -52,6 +58,8 @@ from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, Vt
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from track import read_track
 import course_ref
+import course_tiles
+import object_contacts
 import pace_notes
 from ro3 import read_ro3
 from ro3_to_glb import pcx_png, orient_polys
@@ -101,6 +109,52 @@ STAGE_NAMES = {
     61: 'Chirdonhead', 62: 'Falstone', 63: 'Kershope', 64: 'Pundershaw', 65: 'Riccarton', 66: 'Newcastleton',
     71: 'Moon and Star', 72: 'Bothwell', 73: 'Whitchester', 74: 'Eccles', 75: 'Langton', 76: 'Fogo',
 }
+
+
+# The sea. The game has none in the level: it is painted on the lower half of the sky dome that follows the camera (sky
+# pages 373..375, used only by Port Soderick and Ballagyr). Only Port Soderick has a coast in its geometry: the cliff of
+# Marine Drive ends in a strip of faces that fade out (texture page 520, second layer alone).  stage -> (that page, the
+# direction of the open sea in degrees, STJ frame, = the middle of the dome's open-water panels)
+SEA = {21: (520, -65.0)}
+SEA_REACH, SEA_UNDERLAP, SEA_BIN = 3000.0, 40.0, 60.0     # m: how far out; how far in under the cliff; coast step
+
+
+def sea_outline(foot, azimuth):
+    """foot = the points of the cliff's fading edge. Returns the coast (most seaward point of every SEA_BIN metres
+    along the coast, moved SEA_UNDERLAP inland) and the matching points far out to sea, as two lists of (x, y)."""
+    out = (math.cos(math.radians(azimuth)), math.sin(math.radians(azimuth)))
+    along = (-out[1], out[0])
+    bins = {}
+    for x, y in foot:
+        u, v = x * along[0] + y * along[1], x * out[0] + y * out[1]
+        k = int(u // SEA_BIN)
+        if k not in bins or v > bins[k][1]:
+            bins[k] = (u, v)
+    uv = [bins[k] for k in sorted(bins)]
+    far = max(v for _u, v in uv) + SEA_REACH
+    point = lambda u, v: (u * along[0] + v * out[0], u * along[1] + v * out[1])
+    return [point(u, v - SEA_UNDERLAP) for u, v in uv], [point(u, far) for u, _v in uv]
+
+
+def write_sea(path, coast, far, level):
+    """A flat water surface as its own mesh file (role visual)."""
+    st = Usd.Stage.CreateNew(path)
+    UsdGeom.SetStageUpAxis(st, UsdGeom.Tokens.z)
+    UsdGeom.SetStageMetersPerUnit(st, 1.0)
+    st.SetDefaultPrim(UsdGeom.Xform.Define(st, '/track').GetPrim())
+    UsdGeom.Scope.Define(st, '/track/water')
+    mat = Mats(st).get('sea', None, alpha=False, colour=(0.05, 0.11, 0.17))   # about the dome's open-water colour
+    corners = []
+    for i in range(len(coast) - 1):
+        quad = [coast[i], coast[i + 1], far[i + 1], far[i]]
+        pts = [(x, y, level) for x, y in quad]
+        for tri in ((0, 1, 2), (0, 2, 3)):
+            a, b, c = (pts[k] for k in tri)
+            if (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]) < 0:
+                b, c = c, b                                   # counter-clockwise seen from +Z
+            corners += [(q, (q[0] / 50.0, q[1] / 50.0)) for q in (a, b, c)]
+    write_mesh(st, '/track/water/sea', corners, mat)
+    st.GetRootLayer().Save()
 
 
 def stj(v):
@@ -323,7 +377,7 @@ SURFACE_NAMES = {1: ('tarmac', 'asphalt'), 2: ('gravel', 'gravel'), 3: ('mud', '
 
 
 def surfaces_block(surf_used, keys):
-    """One surface per game profile in use, bound to the terrain meshes `/track/ground/TXnnnn_S<profile>`."""
+    """One surface per game profile in use, bound to the terrain meshes `keys` = [(mesh name, profile)]."""
     prof = exe_surface_profiles()
     lib, bind = {}, []
     for k in sorted(surf_used):
@@ -341,8 +395,8 @@ def surfaces_block(surf_used, keys):
                 e['mf_scaling'] = {'LMUX': round(g / 120.0, 3), 'LMUY': round(g / 120.0, 3),
                                    '_est': 'grip_table[1] (set A, index 0) / 120 (profile 1, the highest); the game picks the entry by a per-car index 0..5 and blends sets A and B by a level-wide 0..1 value (0x43ba9e)'}
         lib['rcx_s%d' % k] = e
-    for tid, sf in sorted(keys):
-        bind.append({'mesh_ref': 'stage', 'prim': '/track/ground/TX%04d_S%d' % (tid, sf), 'surface': 'rcx_s%d' % sf})
+    for mesh, sf in sorted(keys):
+        bind.append({'mesh_ref': 'stage', 'prim': '/track/ground/%s_S%d' % (mesh, sf), 'surface': 'rcx_s%d' % sf})
     return {'default': 'rcx_s%d' % max(surf_used, key=surf_used.get) if surf_used else 'rcx_s0', 'library': lib,
             'bindings': bind}
 
@@ -418,7 +472,7 @@ def environment_raw(ld, sky=None):
             '_note': 'raw values; angle conventions and the exact use of the colours are not verified'}
 
 
-def build_document(name, t, road, placed, textures, n_polys, surf_used, keys, env=None, mk=None):
+def build_document(name, t, road, placed, textures, n_polys, surf_used, keys, env=None, mk=None, scenery=None):
     doc = {
         '_metadata': {
             'specification': 'STJ', 'version': '0.3', 'coordinate_system': 'OpenDRIVE', 'units': 'SI',
@@ -434,17 +488,28 @@ def build_document(name, t, road, placed, textures, n_polys, surf_used, keys, en
                     'lost': ['road width (the road line has no width in the level files)',
                              'pace-note call timing and spoken distances (kept in the x_rcx of each note)',
                              'object pitch and roll (kept in x_rcx.objects)',
+                             'object reactions: wobbling, leaning, falling and sliding away when touched (no mass in the '
+                             'data, so no `physics`; kept in the prototypes\' x_rcx)',
+                             'which direction an object collides in: prototypes follow the forward line',
+                             'gloss and additive faces without a first texture layer (water, coast strip, some hedges and '
+                             'walls): the game blends them with what is behind; here they show their own picture',
                              'replay camera zoom and any fixed aim (cameras are listed as tracking; ranges = nearest camera along the road line)',
-                             'water (LEVEL03/13 holes, LEVEL05/15 edges: drawn by the game, not in the data)']}]}},
+                             'water (the game paints the sea on the sky dome; Port Soderick gets an estimated water body, '
+                             'LEVEL03/13 holes and LEVEL05/15 edges get none)']}]}},
         'track_info': {'name': name, 'type': 'point_to_point', 'primary_surface': 'other'},
         # the stage's own name (levels 01-06 and 11-16 are not in the table)
         'geometry': {'meshes': [{'id': 'stage', 'uri': '%s.usda' % name, 'roles': ['visual', 'collision'],
                                  'baked': {'vertex_colour': {'primvar': 'displayColor', 'role': 'light'}}}]},
         'surfaces': surfaces_block(surf_used, keys),
-        'x_rcx': {'game_unit_is_metre': True, 'object_collision': 'all placed objects marked as collision (estimate: the game decides per object material kind)', 'polygons': n_polys, 'objects': placed, 'environment': env},
+        'x_rcx': {'game_unit_is_metre': True, 'polygons': n_polys, 'objects': placed, 'environment': env},
     }
     if int(name[5:]) in STAGE_NAMES:
         doc['track_info']['name'] = STAGE_NAMES[int(name[5:])]
+    if scenery and scenery[0]:
+        protos, sets = scenery
+        doc['scenery'] = {'prototypes': protos,
+                          'instances': [{'prototype': pid, 'usd': {'mesh_ref': 'stage', 'prim': prim}}
+                                        for pid, prim in sorted(sets.items())]}
     if env and env.get('sky_dome'):
         doc.setdefault('environment', {})['sky'] = {'model': 'engine_default', 'x_rcx': env['sky_dome']}
     if mk:
@@ -549,49 +614,96 @@ def convert(sq_path, out_dir):
     tex, mats = Textures(out), Mats(stage)
 
     # --- terrain: same grouping and triangulation as track_to_glb.convert -----------------------------------
-    groups = {}
+    groups = {}        # (texture: page number or baked page name, surface) -> [(corner points, uv 0..1, shade)]
+    cards = {}         # the same, for the cut-out panels the game's car cannot hit (course_tiles.is_loose_card)
+    pages = course_tiles.Pages(os.path.join(FILES, 'A'))
+    atlas = course_tiles.Atlas(pages)
+    border = course_tiles.ground_border(t['polys'], vs)
+    sea_page, sea_azimuth = SEA.get(int(name[5:]), (None, 0.0))
+    sea_foot = []      # where the cliff above the sea fades out
     for p in t['polys']:
         if p[0] & 0xFF == 0xFF or p[6] == 16 or max(p[1:5]) >= len(vs):
             continue
-        code = tiles[(p[0] >> 8) & 0xFF]
-        c = struct.unpack_from('<4I', textinfo, code * 128) if 0 <= code < 16000 else (0,) * 4
-        if not any(c):
-            c = (0x00000000, 0x0000FFFF, 0xFFFF0000, 0xFFFFFFFF)
-        uv = [((w & 0xFFFF) / 256.0, (w >> 16) / 256.0) for w in c]   # pixels; divided by the page size below
+        a, b, weights, mode = course_tiles.face_layers(p, tiles, textinfo, t['verts'])
+        if not a and not b:
+            continue                                   # no layer to see: the game draws nothing
+        code = (a or b)[0]
+        baked = None
+        if course_tiles.needs_bake(a, b, weights, mode):   # two layers, or one faded, darkening or additive one
+            baked = atlas.add(a, b, weights, mode)
+        if baked:
+            tex_key, uv = baked
+        else:
+            layer = a or b
+            pw, ph = page_size(layer[0] >> 4)
+            tex_key, uv = layer[0] >> 4, [(u / pw, v / ph) for u, v in layer[1]]
         shade = [((p[5] >> (8 * k)) & 255) / 255.0 for k in range(4)]
         # surface profile: low byte of TEXTINFO+0x20 (slot byte +0x10); polygons flagged 0x1000 use profile 5
         surf = textinfo[code * 128 + 0x20] if 0 <= code < 16000 else 0
         if (p[0] >> 16) & 0x1000:
             surf = 5
-        groups.setdefault((code >> 4, min(surf, 13)), []).append((p[1:5], uv, shade))
+        if sea_page is not None and not a and b[0] >> 4 == sea_page:
+            sea_foot += [vs[p[1 + k]][:2] for k in range(4) if weights[k] == 0]
+        into = cards if course_tiles.is_loose_card(p, vs, border, pages, a, b, weights, mode) else groups
+        into.setdefault((tex_key, min(surf, 13)), []).append((p[1:5], uv, shade))
+    baked_rel = {}
+    for page, image in atlas.images():
+        os.makedirs(tex.dir, exist_ok=True)
+        image.save(os.path.join(tex.dir, page + '.png'))
+        baked_rel[page] = 'textures/%s.png' % page
+    def write_terrain(into_stage, into_mats, scope, items):
+        for (tid, sf), quads in sorted(items.items(), key=lambda kv: (str(kv[0][0]).zfill(12), kv[0][1])):
+            corners, colours = [], []
+            for idx, uv, sh in quads:
+                # the game's two triangles (0,1,2) and (3,2,1), written counter-clockwise seen from +Z (normal up)
+                for tri in ((0, 2, 1), (3, 1, 2)):
+                    for k in tri:
+                        corners.append((vs[idx[k]], uv[k]))
+                        colours.append(sh[k])
+            if tid in baked_rel:
+                name_ = tid
+                mat = into_mats.get(tid, baked_rel[tid], alpha=True)
+                mat.GetPrim().SetCustomDataByKey('stj:baked', {
+                    'reason': 'the game blends texture layers by corner weights (alpha, gloss or additive)', 'tool': TOOL, 'tool_version': TOOL_VERSION,
+                    'source': 'RCX course face layers (tools/course_tiles.py)'})
+                mat.GetPrim().SetCustomDataByKey('x_rcx', {'recipe': json.dumps({
+                    'cell': 'per cell [layer A or null, layer B, B corner weights 0..255, mode]; a layer = [tile code '
+                            '(page = code >> 4), corner uv in page pixels (outside the page it repeats)]; mode: alpha = '
+                            'A(1-w)+Bw, gloss = A(1-Bw), add = A+Bw', 'cells': atlas.cells[tid]}, separators=(',', ':'))})
+            else:
+                name_ = 'TX%04d' % tid
+                rel = tex.get(os.path.join(FILES, 'A', 'TX%04d.PCX' % tid))
+                if tid == 0:
+                    # texture group 0 is never a file (there is no TX0000.PCX): the game draws these polygons with no
+                    # texture, the vertex colour only (RC2000 decomp: scene::choose_texture -> NO_TEXTURE); in LEVEL61
+                    # they are the power cables
+                    mat = into_mats.get('untextured', None, alpha=False, colour=(1.0, 1.0, 1.0))
+                else:
+                    mat = into_mats.get(name_ if rel else 'missing_' + name_, rel, alpha=True)
+            write_mesh(into_stage, '%s/%s_S%d' % (scope, name_, sf), corners, mat, colours=colours)
+
     surf_used = {}
-    for (tid, sf), quads in sorted(groups.items()):
+    for (tid, sf), quads in groups.items():
         surf_used[sf] = surf_used.get(sf, 0) + len(quads)
-        rel = tex.get(os.path.join(FILES, 'A', 'TX%04d.PCX' % tid))
-        corners, colours = [], []
-        pw, ph = page_size(tid)
-        for idx, uv, sh in quads:
-            uv = [(u / pw, v / ph) for u, v in uv]
-            for tri in ((0, 3, 1), (0, 2, 3)):      # counter-clockwise seen from +Z: the normal (right-handed) points up
-                for k in tri:
-                    corners.append((vs[idx[k]], uv[k]))
-                    colours.append(sh[k])
-        if tid == 0:
-            # texture group 0 is never a file (there is no TX0000.PCX): the game draws these polygons with no texture, the
-            # vertex colour only (RC2000 decomp: scene::choose_texture -> NO_TEXTURE); in LEVEL61 they are the power cables
-            mat = mats.get('untextured', None, alpha=False, colour=(1.0, 1.0, 1.0))
-        else:
-            mat = mats.get('TX%04d' % tid if rel else 'missing_TX%04d' % tid, rel, alpha=True)
-        write_mesh(stage, '/track/ground/TX%04d_S%d' % (tid, sf), corners, mat, colours=colours)
+    write_terrain(stage, mats, '/track/ground', groups)
+    cards_file = os.path.join(out, name + '_cards.usda')
+    if os.path.exists(cards_file):
+        os.remove(cards_file)
+    if cards:
+        card_stage = Usd.Stage.CreateNew(cards_file)
+        UsdGeom.SetStageUpAxis(card_stage, UsdGeom.Tokens.z)
+        UsdGeom.SetStageMetersPerUnit(card_stage, 1.0)
+        card_stage.SetDefaultPrim(UsdGeom.Xform.Define(card_stage, '/track').GetPrim())
+        UsdGeom.Scope.Define(card_stage, '/track/cards')
+        write_terrain(card_stage, Mats(card_stage), '/track/cards', cards)
+        card_stage.GetRootLayer().Save()
 
     # --- placed objects (see track_to_glb.place_objects) -------------------------------------------------------
     ld = struct.unpack_from('<%di' % (len(local) // 4), local, 0)
     UsdGeom.Scope.Define(stage, '/track/prototypes')
     objs = UsdGeom.Scope.Define(stage, '/track/objects')
-    # the game tests the car against placed objects too (physics::face_contact -> object_hits_car, RC2000 decomp), so the
-    # instances are collision surface; which objects are actually solid depends on a per-model material kind not decoded here
-    objs.GetPrim().CreateAttribute('stj:collision', Sdf.ValueTypeNames.Bool, custom=True).Set(True)
     protos, placed, counts = {}, [], {}
+    scenery_protos, scenery_sets, heights = {}, {}, {}
     for p in t['polys']:
         if not is_placed_object(p) or p[1] >= len(vs):
             continue
@@ -606,17 +718,31 @@ def convert(sq_path, out_dir):
         if pname not in protos:
             add_prototype(stage, tex, mats, path, pname)
             protos[pname] = True
+        pid, entry = object_contacts.prototype(FILES, m, p, slot)
+        if pid not in scenery_protos:
+            if pname not in heights:
+                ys = [v[1] for v in read_ro3(path)[0]]
+                heights[pname] = round(max(ys) - min(ys), 3)
+            entry['mesh'] = {'mesh_ref': 'stage', 'prim': '/track/prototypes/' + pname}
+            if heights[pname] > 0:
+                entry['height'] = heights[pname]
+            scenery_protos[pid] = entry
+            scenery_sets[pid] = '/track/objects/' + pid
+            UsdGeom.Xform.Define(stage, scenery_sets[pid])
         k = counts[pname] = counts.get(pname, 0) + 1
+        prim_path = '%s/%s_%d' % (scenery_sets[pid], pname, k)
         x, y, z = vs[p[1]]
         dz = (p[7] - (1 << 32) if p[7] >> 31 else p[7]) / 65536.0
-        inst = UsdGeom.Xform.Define(stage, '/track/objects/%s_%d' % (pname, k))
+        inst = UsdGeom.Xform.Define(stage, prim_path)
+        if scenery_protos[pid]['collision'] == 'mesh':      # the static collision surface (spec 7.2); trunks are not
+            inst.GetPrim().CreateAttribute('stj:collision', Sdf.ValueTypeNames.Bool, custom=True).Set(True)
         inst.GetPrim().GetReferences().AddInternalReference('/track/prototypes/' + pname)
         inst.GetPrim().SetInstanceable(True)
         inst.AddTranslateOp().Set(Gf.Vec3d(x, y, z + dz))
         inst.AddRotateZOp().Set(p[2] * 360.0 / 256.0)
         sc = object_scale(p)
         inst.AddScaleOp().Set(Gf.Vec3f(sc, sc, sc))
-        placed.append({'prim': '/track/objects/%s_%d' % (pname, k), 'model': m, 'p2': p[2], 'p3': p[3], 'p4': p[4],
+        placed.append({'prim': prim_path, 'model': m, 'p2': p[2], 'p3': p[3], 'p4': p[4],
                        'size': p[6]})
     # --- sky: scene object 1 = the model in LOCALDAT[321] (a 3 m dome with 7 sky textures), drawn by the game around the
     # camera with no far clip, turned by sky_turn and raised by sky_height (race::draw_sky / sky_matrix, RC2000 decomp).
@@ -644,7 +770,32 @@ def convert(sq_path, out_dir):
     UsdGeom.Imageable(stage.GetPrimAtPath('/track/prototypes')).CreateVisibilityAttr(UsdGeom.Tokens.invisible)
 
     road = build_road(t, sq_path)
-    doc = build_document(name, t, road, placed, tex, len(t['polys']), surf_used, list(groups), environment_raw(ld, sky), level_markers(t, vs))
+    doc = build_document(name, t, road, placed, tex, len(t['polys']), surf_used,
+                         [(k if isinstance(k, str) else 'TX%04d' % k, sf) for k, sf in groups], environment_raw(ld, sky), level_markers(t, vs),
+                         (scenery_protos, scenery_sets))
+    if cards:
+        doc['geometry']['meshes'].append({
+            'id': 'cards', 'uri': '%s_cards.usda' % name, 'roles': ['visual'],
+            'baked': {'vertex_colour': {'primvar': 'displayColor', 'role': 'light'}}})
+        doc['x_rcx']['cards'] = {'faces': sum(map(len, cards.values())),
+                                 'rule': 'standing see-through faces flagged not ground (0x80), off the edge of the ground: '
+                                         'the game never tests the car against them'}
+    water_file = os.path.join(out, name + '_water.usda')
+    if os.path.exists(water_file):
+        os.remove(water_file)
+    if sea_foot:
+        coast, far = sea_outline(sea_foot, sea_azimuth)
+        level = round(min(v[2] for v in vs) - 1.0, 1)       # under all of the level's geometry
+        write_sea(water_file, coast, far, level)
+        doc['geometry']['meshes'].append({'id': 'water', 'uri': '%s_water.usda' % name, 'roles': ['visual']})
+        doc['water'] = {'bodies': [{
+            'id': 'sea', 'kind': 'sea', 'name': 'sea off the coast road', 'level': level, 'depth': 10.0,
+            'outline': [[round(x, 1), round(y, 1)] for x, y in coast + far[::-1]],
+            'drivable': False, 'out_of_bounds': True,
+            'mesh': {'mesh_ref': 'water', 'prim': '/track/water/sea'},
+            'x_rcx': {'_estimate': 'the game paints the sea on its sky dome: the coast line is the fading foot of the '
+                                   'cliff (texture page %d) and the side is where the dome shows open water; the level (1 m under '
+                                   'the lowest point of the geometry) and the depth are not game data' % sea_page}}]}
     if road and doc.get('timing'):
         add_timing_markers(stage, road, doc['timing'])
     stage.GetRootLayer().customLayerData = {'stj': json.dumps(doc, separators=(',', ':'))}
