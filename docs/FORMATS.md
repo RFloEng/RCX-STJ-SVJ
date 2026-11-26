@@ -46,7 +46,7 @@ The game copies the header to `0x5ccc94`; records live at `[0x5ccc3c]` (64 bytes
 | `p[2]`,`p[3]`,`p[4]` | special objects: yaw (1/256 turn about +Y), pitch?/roll? (unapplied) |
 | `p[7]` | object height offset, 16.16 |
 | `p[9]` byte 2 | **`1` = first point of the road line, `2` = checkpoint** |
-| `p[10]` bytes 0..3 | **four pace-note slots** (below) |
+| face bytes 40..43, 25..27, 32 | **eight pace-note slots** of a road-line point (below) |
 | other | runtime scratch (zero in the file) or undecoded |
 
 ### Texturing (terrain)
@@ -90,12 +90,21 @@ from it are 3–41 km (one game unit taken as one metre) and agree between both 
 line (15–28 m) and 11–16 none. From the code (`0x45a718` "init checkpoints", `0x4417fd` "init pacenotes"):
 
 * byte `0x26` (`p[9] >> 16`): `1` start of the line, `2` checkpoint (stage 75: 5 checkpoints, stages 35 and 44: 15).
-* bytes `0x28..0x2b` (`p[10]`): up to four note codes per point. `99` opens and `100` closes a note zone, `98` is a third
-  marker, `1..97` are note codes. **How a code maps to a speech file is not decoded** (the co-driver words are in
-  `FILES/SPEECH/{F,M}/{INSTRUCT,GENERAL,DISTANCE,SUFFIX}`; the exe's table order gives 47 = left 4, 50 = left hairpin,
-  52 = right 1, 55 = right 4 but codes 62/68/71 land on comment phrases, so the index is not direct).
+* **Pace notes** (`RAL.EXE` `0x441941..0x441b98`; same logic as the RC2000 decompilation `race/pace_notes.rs`; port in
+  `tools/pace_notes.py`). Each point has eight code slots at face bytes 40, 41, 42, 43, 25, 26, 27, 32 (table `0x614c94`); a place
+  is point × 8 + slot. A note runs from a code in 1..99 other than 98 to the next 98 or 100; its calls are read from the start
+  until a 0 or 100. `99` = corner worked out from the road: length = line distance over the note, turn = heading (`atan2(dx, dz)`)
+  at its end minus before its start, grade 1..5 = |turn|·60 / max(length, 60 m) cut at 0xCCC/0x1998/0x2664/0x3330 (5 = tightest),
+  +8 for 120 m or longer, +16 for a right-hander. Notes start two points after the first check. A group is said at the end of the
+  previous note: a distance word for the gap (table `0x614cb8`, 30..400 m), then the note and the ones within 30 m of it.
+* **A code is a cue, not a speech file number.** 113 pointers at `0x5124f8` give each cue a list of sound records (-1 ends it);
+  cues 0..83 are identical to the RC2000 `CueLists`; record `(r - 0xED) // 2` = phrase of the exe's speech file list. 1..8 =
+  left 1..5, square, hairpin, tight hairpin; 9..13 long left 1..5; 17..24 and 25..29 the same to the right; 30 long,
+  31 straight, 32..41 distances and "into", 47..73 suffixes and features (52 over, 55 past, 65 crest, 68 junction),
+  80..83 comments; 84 or more ends the group ("invalid pace data"). Check: 165 of the 167 hand-placed corner cues on a bend of
+  30° or more turn the same way as the road.
 * Slots `0x3c` and `0x38` hold markers whose purpose is unknown.
-* Replay cameras: marker polygons with slot 0x38 / 0x3C (position = first vertex; orientation and range not decoded). Lamps are slot 0x3B, sound spots 0x3F (`p[2]` = sound id). Layout cross-checked with the RC2000 decompilation (sibling game, same engine; github.com/Diatosta/rc2k_decomp, GPL-3.0 — only format facts were used, no code). Pace-note code 99 is a corner measured from the route, 100/98 end markers.
+* Replay cameras: marker polygons with slot 0x38 / 0x3C (position = first vertex; orientation and range not decoded). Lamps are slot 0x3B, sound spots 0x3F (`p[2]` = sound id). Layout cross-checked with the RC2000 decompilation (sibling game, same engine; github.com/Diatosta/rc2k_decomp, GPL-3.0 — only format facts were used, no code).end markers.
 
 ## `LOCALDAT` (8300 bytes per stage)
 

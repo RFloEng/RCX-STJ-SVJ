@@ -24,9 +24,10 @@ What is written:
                other way, so there is no width in the data); `s` is the plan length along it (levels 21..76; levels
                01-06 have a 3-record line and 11-16 none, they get no reference)
   * timing     start = first check record, finish = last check record, `split_points` = the checks between (byte 0x26 != 0, line records 1..last-1; RC2000 decomp)
-  * x_rcx      everything the document has no field for: the pace-note slot bytes with their `s` and direction (forward
-               chain, and the reverse chain converted to forward s; code -> speech not decoded), zone open/close
-               markers, the object table and the raw record indices
+  * pace notes `race.pacenotes` = the calls the game makes on the forward line (pace_notes.py: cue table and computed
+               corners as in RAL.EXE); the reverse direction's calls are in x_rcx.pace_notes_reverse
+  * x_rcx      everything the document has no field for: the raw pace-note slot bytes with their `s` and direction
+               (forward chain, and the reverse chain converted to forward s), the object table and the raw record indices
   * provenance converted_from with the `lost` list; licence.redistributable = false (commercial game content)
 
 Ideas / TODO:
@@ -36,8 +37,6 @@ Ideas / TODO:
     profile 5.  The 14 profiles (48 bytes at 0x6138f8 of RAL.EXE: grip-table pointer + floats) are read from your
     RAL.EXE into x_rcx; the class stays 'other' because the profiles carry no name.  Profile 0 and 13 have a grip
     table of 1 (not a driving surface?), 1 has the highest grip (tarmac-like), 9 the lowest.
-  * Pace notes: when the code -> call mapping is decoded, write `race.pacenotes.notes[]` (call, kind, direction,
-    severity) instead of `x_rcx.pace_notes`.
   * Object size p6 (16 = natural) is applied as scale p6/16; pitch/roll (p3/p4) are in x_rcx but not applied.
   * `scenery.prototypes/instances` could describe the objects in the document; for now they only exist as USD prims.
   * A .usdz package: `python tools/stj_usd.py package` from the STJ repository.
@@ -53,6 +52,7 @@ from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, Vt
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from track import read_track
 import course_ref
+import pace_notes
 from ro3 import read_ro3
 from ro3_to_glb import pcx_png, orient_polys
 from track_to_glb import TILE_SWAP, FILES, FALLBACK, model_path, is_placed_object, object_scale, page_size
@@ -270,85 +270,48 @@ def build_road(t, sq_path):
 
 
 def markers(P, chain, s_of, direction):
-    """Checkpoint / pace-note bytes of a chain. `s_of(i)` gives the forward s of chain index i (or None)."""
-    splits, notes, zones = [], [], []
+    """The raw note bytes of a chain (all eight slots of each line point). `s_of(i)` gives the forward s of chain index i."""
+    raw = []
     for i, r in enumerate(chain):
         si = s_of(i)
         if si is None:
             continue
-        p = P[r]
-        kind = (p[9] >> 16) & 0xFF
-        if kind == 2 and direction == 'forward':
-            splits.append({'id': 'cp%d' % (len(splits) + 1), 'name': 'checkpoint %d' % (len(splits) + 1),
-                           's': round(si, 3)})
-        for slot, v in enumerate((p[10] >> (8 * k)) & 0xFF for k in range(4)):
+        for slot, v in enumerate(pace_notes.face_codes(P[r])):
             if v:
-                e = {'s': round(si, 3), 'direction': direction, 'record': r, 'slot': slot, 'code': v}
-                (zones if v in (98, 99, 100) else notes).append(e)
-    return splits, notes, zones
+                raw.append({'s': round(si, 3), 'direction': direction, 'record': r, 'slot': slot, 'code': v})
+    return raw
 
 
-# Pace-note codes = index into the exe's speech table (0x105e1a / 0x106b14: count..go, distance, suffix, general,
-# instruct, comment).  Checked: 47 left4, 50 lefthp, 52 right1, 55 right4 (the offset is the 6 `count` files).
-GENERAL_KIND = {20: 'bank', 21: 'bridge', 22: 'caution', 23: 'twisty', 24: 'crest', 25: 'ditch', 26: 'finish', 27: 'other',
-                28: 'other', 29: 'water', 30: 'jump', 31: 'junction', 32: 'other', 33: 'other', 34: 'other',
-                35: 'dip', 36: 'other', 37: 'surface_change', 38: 'other', 39: 'other', 40: 'other', 41: 'other',
-                42: 'other', 43: 'water'}
-GENERAL_NAME = ['bank', 'bridge', 'caution', 'chicane', 'crest', 'ditch', 'finish', 'gate', 'haybales', 'ice', 'jump',
-                'junction', 'logs', 'loose gravel', 'over', 'past', 'road dips', 'rocks', 'rough surface',
-                'slippery surface', 'through', 'to stop', 'under', 'water']
+def line_notes(t, chain):
+    """The game's own pace notes along a line chain (tools/pace_notes.py)."""
+    P, V = t['polys'], t['verts']
+    pts = [(int(round(V[P[r][1]][0] * 65536)), int(round(V[P[r][1]][2] * 65536))) for r in chain]
+    return pace_notes.make_notes([pace_notes.face_codes(P[r]) for r in chain], pts, [(P[r][9] >> 16) & 0xFF for r in chain])
 
 
-def pacenote_of(code):
-    """(kind, direction, severity, call) for a corner / general code, or None (counts, distances, suffixes, comments)."""
-    if 44 <= code <= 59:
-        side = 'left' if code < 52 else 'right'
-        k = code - (44 if code < 52 else 52)           # 0..4 = 1..5, 5 square, 6 hairpin, 7 tight hairpin
-        if k < 5:
-            return 'turn', side, k + 1, '%s %d' % (side, k + 1)
-        return ('square', side, None, side + ' square') if k == 5 else                ('hairpin', side, None, side + (' hairpin' if k == 6 else ' tight hairpin'))
-    if code == 61:
-        return 'straight', None, None, 'straight'
-    if code == 68:      # speech table entry 68 = comment\ohno.wav; stage data: 45 times in LEVEL61, mostly right after "right 4"
-        return 'other', None, None, 'oh no'
-    if 20 <= code <= 43:
-        name = GENERAL_NAME[code - 20]
-        kind = {'bridge': 'bridge', 'caution': 'caution', 'chicane': 'twisty', 'crest': 'crest', 'jump': 'jump',
-                'junction': 'junction', 'finish': 'finish', 'water': 'water', 'road dips': 'dip', 'ditch': 'other'}.get(name, 'other')
-        return kind, None, None, name
-    return None
-
-
-def pacenotes_block(notes):
-    """race.pacenotes from the forward chain's notes; everything not decoded stays in x_rcx.pace_notes."""
-    by_rec = {}
-    for n in notes:
-        if n['direction'] == 'forward':
-            by_rec.setdefault((n['s'], n['record']), []).append(n['code'])
+def pacenote_entries(notes, s_of):
+    """STJ entries of the game's notes. `s_of(chain index)` gives the s on the reference line."""
     out = []
-    for (s_, rec), codes in sorted(by_rec.items()):
-        mods = []
-        if 60 in codes:
-            mods.append('long')
-        if 16 in codes:
-            mods.append('dont_cut')
-        if 18 in codes:
-            mods.append('opens')
-        if 19 in codes:
-            mods.append('tightens')
-        for c in codes:
-            r = pacenote_of(c)
-            if r:
-                e = {'s': s_, 'kind': r[0], 'call': r[3]}
-                if r[1]:
-                    e['direction'] = r[1]
-                if r[2]:
-                    e['severity'] = r[2]
-                if mods:
-                    e['modifiers'] = mods
-                out.append(e)
-    return {'scale': 'ascending_1_6', 'language': 'en', 'written_for': 'RCX co-driver (severity 1..5 as the game words it, _est)',
-            'notes': out}
+    for n in notes:
+        si = s_of(n['start'] >> 3)
+        e = pace_notes.stj_note(n['cues'], 0.0 if si is None else round(si, 3)) if si is not None else None
+        if e is None:
+            continue
+        x = {'cues': n['cues']}
+        if n['computed']:
+            x['computed_corner'] = n['computed']
+        if n['joined']:
+            x['joined_to_previous'] = True
+        else:
+            word = pace_notes.distance_word(n['gap_before'])
+            if word:
+                x['distance_called_m'] = pace_notes.DISTANCE_M[word]
+            called = s_of(n['called_at'] >> 3)
+            if called is not None:
+                x['called_at_s'] = round(called, 3)
+        e['x_rcx'] = x
+        out.append(e)
+    return out
 
 
 # profile index -> (name, STJ class); names of the profiles as the game's own list gives them (found through the RC2000
@@ -469,7 +432,7 @@ def build_document(name, t, road, placed, textures, n_polys, surf_used, keys, en
                 'converted_from': [{
                     'format': 'RCX level (RAL.EXE)', 'tool': TOOL, 'tool_version': TOOL_VERSION, 'source': name,
                     'lost': ['road width (the road line has no width in the level files)',
-                                                          'pace-note codes outside corners/general calls (counts, distances, comments; kept in x_rcx.pace_notes)',
+                             'pace-note call timing and spoken distances (kept in the x_rcx of each note)',
                              'object pitch and roll (kept in x_rcx.objects)',
                              'replay camera zoom and any fixed aim (cameras are listed as tracking; ranges = nearest camera along the road line)',
                              'water (LEVEL03/13 holes, LEVEL05/15 edges: drawn by the game, not in the data)']}]}},
@@ -498,7 +461,7 @@ def build_document(name, t, road, placed, textures, n_polys, surf_used, keys, en
                             'length': round(length, 3)}
         P = t['polys']
         src_to_s = dict(zip(road['src'], s))
-        splits, notes, zones = markers(P, road['chain_a'], src_to_s.get, 'forward')
+        notes = markers(P, road['chain_a'], src_to_s.get, 'forward')
         # Start, finish and splits as the game does it (RC2000 decomp race/checkpoints.rs, level_init.rs listed_checkpoints,
         # car_starts.rs start_car): the checks are the line records 1 .. last-1 whose byte 0x26 (p9 byte 2) is not 0; the car
         # is placed on the first check, the stage ends on the last one and the ones between are the splits.  The chain's
@@ -513,18 +476,22 @@ def build_document(name, t, road, placed, textures, n_polys, surf_used, keys, en
             start_s, finish_s, splits = 0.0, length, []
         doc['track_info']['length'] = round(finish_s - start_s, 1)
         sb = road['s_b']
+        back = None
         if sb and sb[-1] > 0:      # reverse direction: s_forward = L - s along the reversed chain
-            _sp, notes_r, zones_r = markers(P, road['chain_b'], lambda i: max(0.0, length - sb[i] * length / sb[-1]),
-                                            'reverse')
-            notes, zones = notes + notes_r, zones + zones_r
+            back = lambda i: max(0.0, length - sb[i] * length / sb[-1])
+            notes += markers(P, road['chain_b'], back, 'reverse')
         doc['timing'] = {'start': {'s': round(start_s, 3)}, 'finish': {'s': round(finish_s, 3)}}
         if splits:
             doc['timing']['split_points'] = splits
-        pn = pacenotes_block(notes)
-        if pn['notes']:
-            doc.setdefault('race', {})['pacenotes'] = pn
+        entries = pacenote_entries(line_notes(t, road['chain_a']), src_to_s.get)
+        if entries:
+            doc.setdefault('race', {})['pacenotes'] = {
+                'scale': 'ascending_1_6', 'language': 'en',
+                'written_for': 'RCX co-driver: the calls the game makes (tools/pace_notes.py); severity = 6 - game grade',
+                'notes': entries}
         doc['x_rcx']['pace_notes'] = notes
-        doc['x_rcx']['zones'] = zones        # 99 = corner measured from the route, 100 = end, 98 = end marker (RC2000 decomp)
+        if back:
+            doc['x_rcx']['pace_notes_reverse'] = pacenote_entries(line_notes(t, road['chain_b']), back)
         doc['x_rcx']['road_line'] = {'records_forward': len(road['chain_a']), 'records_reverse': len(road['chain_b'])}
     return doc
 
