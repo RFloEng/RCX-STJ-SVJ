@@ -25,9 +25,9 @@ face_materials, face_texture_coordinates, draw_face, and scene/draw_polygon.rs: 
     pages of corner 0.  For the value 1 the picture repeats every 32 m.
   * the quad's outline is 0, 1, 3, 2; the game's triangles are (0, 1, 2) and (3, 2, 1): the diagonal is 1-2.
 
-USD preview materials (and plain glTF) cannot blend two textures by corner weights, so each distinct
-(layer A, layer B, weights, mode) is baked once into an atlas page; the bake interpolates per triangle, as the game
-does.  With A under it all three modes bake exactly (distance fog aside).
+track_to_stj.py keeps the two pages and writes the mix in the material (two_layer_material.py).  Plain glTF cannot
+blend two textures by corner weights, so for track_to_glb.py each distinct (layer A, layer B, weights, mode) is baked
+once into an atlas page (Atlas); the bake interpolates per triangle, as the game does.  With A under it all three modes bake exactly (distance fog aside).
 NOT REPRODUCED: B alone in mode 5 or 4 (water ripples, the coast's fading strip, some hedges and walls) darkens or
 lights whatever is BEHIND it.  A material with a cut-out alpha cannot do that (tried: white or black patches), so
 face_layers returns 'alpha' for those faces and they are drawn as B's own picture.

@@ -96,8 +96,8 @@ def object_scale(p):
 
 
 def place_objects(g, t, vs, local):
-    """Special polygon records (flags low byte 0xFF, p6 != 16) are object instances:
-    slot = (flags >> 8) & 0xFF (< 64) -> model id = LOCALDAT dword[320 + slot]
+    """Special polygon records (flags low byte 0xFF) of an object slot are object instances:
+    slot = (flags >> 8) & 0xFF (< 0x38; the higher ones are markers) -> model id = LOCALDAT dword[320 + slot]
     (copied by the game into its object table and loaded as OBJxxxx.RO3);
     position = vertex p1 (+ p7 as a 16.16 height offset); p2 = yaw in 1/256 turns.
     Yaw sign/scale verified statistically: flat signs/banners (models 52, 91, 92, 94,
@@ -110,7 +110,9 @@ def place_objects(g, t, vs, local):
         if not is_placed_object(p) or p[1] >= len(vs):
             continue
         slot = (p[0] >> 8) & 0xFF
-        if slot >= 64 or (slot >= 0x38 and p[6] == 16):
+        # slots 0x38 up are markers (checkpoints, cameras, lamps, sounds), not objects: a checkpoint keeps pace-note
+        # slots in bytes 0x19..0x1B, so the p[6] dword of one need not be 16 (RC2000 decomp, wiki/Course-files.md)
+        if slot >= 0x38:
             continue
         m = ld[320 + slot]
         path = model_path(m)

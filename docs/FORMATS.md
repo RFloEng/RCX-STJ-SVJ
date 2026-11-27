@@ -76,11 +76,23 @@ RC2000 decomp): the corner UVs do not come from the tile but from the corner's p
 `(x, z) * 2^((byte & 3) + 2) / 256`, less the whole pages of corner 0. With the value 1 (all grass tiles of TX363/364/377)
 the picture repeats every 32 m.
 
-`tools/course_tiles.py` does this for both exporters and bakes each distinct blended tile into an atlas page
-(`blend64_*`, `blend128_*`, `blend256_*`), interpolating per game triangle. Over a first layer the bake is exact (distance
-fog aside). **Not reproduced**: B alone in mode 5 or 4 darkens or lights whatever is behind it, which a material with a
-cut-out alpha cannot do; those faces are drawn as B's own picture. None of this has been compared with a screenshot of
-the running game.
+`tools/course_tiles.py` reads the two layers for both exporters. What they write differs:
+
+* **STJ** (`track_to_stj.py`, STJ spec 7.7: a converter does not bake materials): the face keeps the game's own pages.
+  Mesh primvars (faceVarying) `st` (A, or B when there is no A), `stj_st_b` (B) and `stj_weight` (B's corner weight,
+  0..1); one material `mix_<page A | none>_<page B>_<mode>` per combination, with the mix as a MaterialX network and
+  customData `x_rcx {shader, rule, page_a (-1 = none), page_b}`; the mode (`alpha`, `add`, `gloss`, `fade` = no A) is
+  the last word of `shader`. With `w = stj_weight * B's alpha` and `aA` = A's alpha, on the stored (sRGB) texels:
+  alpha: `alpha = w + aA(1-w)`, `colour = (B w + A aA(1-w)) / alpha`; add: same alpha,
+  `colour = (B w + A aA) / alpha`; gloss: `alpha = aA`, `colour = A(1 - B w)`; fade: `alpha = w`, `colour = B`. The face
+  is cut out below alpha 0.5. **The UsdPreviewSurface fallback shows one layer only** (A, or B without A): a reader that
+  follows neither MaterialX nor `x_rcx` shows hard edges. No viewer has been seen rendering the MaterialX network.
+* **GLB** (`track_to_glb.py`; glTF cannot say the mix): each distinct blended tile is baked into an atlas page
+  (`blend64_*`, `blend128_*`, `blend256_*`), interpolating per game triangle.
+
+**Not reproduced**: B alone in mode 5 or 4 darkens or lights whatever is behind it, which a material with a cut-out
+alpha cannot do; those faces are drawn as B's own picture. None of this has been compared with a screenshot of the
+running game.
 
 ```
 slot = byte 1 (layer A) or byte 0x21 (layer B)
@@ -117,10 +129,11 @@ After loading, the game swaps one tile code on some stages (`FUN_0043989a`, whic
 
 ### Placed objects
 
-A special record (low byte `0xFF`, `p[6] != 16`) is an object instance: model id = `LOCALDAT dword[320 + slot]`
+A special record (low byte `0xFF`) of an object slot (byte 1 below `0x38`) is an object instance: model id = `LOCALDAT dword[320 + slot]`
 (`FILES/A/OBJxxxx.RO3`), position = vertex `p[1]` (+ `p[7]` height), yaw = `p[2]` · 360/256 about +Y. Flat signs end up
 perpendicular to the road with this convention (checked statistically on 582 samples). `p[6]` is the size (16 = natural): scale = `p[6]` / 16 (the game scales the object matrix by size/16, RC2000 decomp).
-Every special record of an object slot (< 0x38) is an object, whatever its `p[6]` or `p[9]`: the RC2000 decompilation draws all kind-0xFF records the same way (`p[9]` low byte = lit by the stage sun, size byte = `p[6]`). The chains are the marker slots 0x3d/0x3e, which link through `p[3]` (9818 of 9821 records in LEVEL61); the 843 `p[6]` = 16 records of object slots never link (0 of 843).
+Every such record is an object, whatever its `p[6]` or `p[9]`: the RC2000 decompilation draws all of them the same way (`p[9]` low byte = lit by the stage sun, size byte = `p[6]`).
+Slots `0x38` and up are **not** placed by either export: the RC2000 decompilation wiki (`Course-files.md`) lists them as markers (replay cameras, lamps, sound spots, and the route's checkpoint chains `0x3D` backwards / `0x3E` forwards, which link through `p[3]`: 9818 of 9821 records in LEVEL61; the 843 `p[6]` = 16 records of object slots never link, 0 of 843). A checkpoint keeps pace-note slots in bytes `0x19..0x1B`, the upper bytes of the `p[6]` dword, so testing the whole dword against 16 is wrong: until 2026-11-27 this placed 24 checkpoints (10 stages, models 201/202) as huge pyramids, plus 3 checkpoints with a size byte of 14 or 21.
 `p[3]`, `p[4]` are kept in the node's `extras` but not applied.
 
 #### What the car feels when it touches an object

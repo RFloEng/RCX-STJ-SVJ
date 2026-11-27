@@ -6,7 +6,8 @@ Run from the repository root, with your copy of the game in it. Python 3.10+, `p
 |---|---|
 | `track_to_stj.py` | **main**: stages -> STJ (OpenUSD + `.stj.json`) |
 | `car_to_svj.py` | **main**: cars -> SVJ 0.112 (+ GLB, USDZ) |
-| `course_tiles.py` | terrain texturing: the game's two texture layers, blend modes and the baked atlas |
+| `course_tiles.py` | terrain texturing: the game's two texture layers and blend modes (and the baked atlas of the GLB) |
+| `two_layer_material.py` | STJ material of a two-layer face: original pages, MaterialX mix, one-layer fallback (nothing baked) |
 | `object_contacts.py` | which placed objects are solid, and their STJ `scenery` prototypes |
 | `track.py`, `sqsl.py` | read a stage `CDAT00C.SQ` (SQSL decompressor, polygon records) |
 | `ro3.py`, `lwob.py`, `lwo2obj.py` | read RO3 runtime models and LightWave LWOB sources |

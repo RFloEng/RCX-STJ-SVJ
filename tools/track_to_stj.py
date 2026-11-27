@@ -5,8 +5,9 @@ usage: python track_to_stj.py <out_dir> <CDAT00C.SQ> [...]       (needs `pip ins
 
 Output, per level:  <out_dir>/LEVELnn/LEVELnn.usda      root layer: geometry + the STJ document in customLayerData["stj"]
                     <out_dir>/LEVELnn/textures/*.png    PCX pages converted to PNG (magenta colour key -> alpha)
-The geometry is the same as track_to_glb.py writes (same triangles, UVs, baked shade, object placement); only the
-container, the frame and the document are new.  Read track_to_glb.py first for how the game data is decoded.
+The geometry is the same as track_to_glb.py writes (same triangles, baked shade, object placement); the container,
+the frame, the document and the two-layer materials (the GLB bakes them into pictures) are new.
+Read track_to_glb.py first for how the game data is decoded.
 
 Frame (spec 4.3):  the game is left-handed with Y up; STJ is right-handed with Z up.
     STJ = (x, z, y) of the game      (a mirror of the game's frame, so triangle winding is the glTF one)
@@ -16,8 +17,8 @@ Frame (spec 4.3):  the game is left-handed with Y up; STJ is right-handed with Z
 What is written:
   * geometry   /track/ground/TXnnnn     terrain, one Mesh per texture page; visual AND collision (`stj:collision`
                                          on /track/ground, doubleSided = true because the game collides both sides)
-               /track/ground/blend*      faces with two texture layers (or one faded one), baked into atlas pages
-                                         (course_tiles.py: each layer's orientation, the weights per corner)
+               /track/ground/mix_*       faces with two texture layers (or one faded one): the game's own two pages,
+                                         mixed by the material, nothing baked (two_layer_material.py)
                LEVELnn_cards.usda        second mesh file, role `visual` only: cut-out standing panels (leaves, bushes)
                                          that the game's car can never hit; solid they are invisible barriers
                LEVEL21_water.usda        the sea of Port Soderick as `water.bodies` + its surface (SEA: an estimate)
@@ -25,7 +26,8 @@ What is written:
                /track/objects/<proto>/    placed objects (signs, trees, buildings...) with their yaw, grouped by
                                           prototype; `stj:collision` only on the instances that are solid by mesh
   * scenery    `prototypes` (what a vehicle hits: object_contacts.py) and one USD `instances` set per prototype
-               materials: UsdPreviewSurface + UsdUVTexture (nearest filter like the game); the baked light is the
+               materials: UsdPreviewSurface + UsdUVTexture (nearest filter like the game); a mix_* material also has
+               the mix as a MaterialX network, and its UsdPreviewSurface shows one layer only; the baked light is the
                `displayColor` primvar and is declared `baked.vertex_colour` (role light), not multiplied into the albedo
   * reference  centerline = the road line (slot 0x3e chain, see course_ref.py; slot 0x3d is the same line walked the
                other way, so there is no width in the data); `s` is the plan length along it (levels 21..76; levels
@@ -50,6 +52,7 @@ Ideas / TODO:
 import json
 import math
 import os
+import re
 import struct
 import sys
 
@@ -57,6 +60,7 @@ from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, Vt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from track import read_track
+import two_layer_material
 import course_ref
 import course_tiles
 import object_contacts
@@ -192,6 +196,15 @@ class Mats:
         self.cache = {}
         UsdGeom.Scope.Define(stage, '/track/materials')
 
+    def mix(self, name, page_a, page_b, mode, page_rel):
+        """A two-layer material: the fallback shows layer A (B when there is none) and the mix is added to it."""
+        if name not in self.cache:
+            rel_b = page_rel(page_b)
+            rel_a = None if page_a is None else page_rel(page_a)
+            mat = self.get(name, rel_a or rel_b, alpha=True)
+            two_layer_material.add_mix(self.stage, mat, page_a, page_b, rel_a, rel_b, mode)
+        return self.cache[name]
+
     def get(self, name, tex_rel, alpha, colour=FALLBACK):
         if name in self.cache:
             return self.cache[name]
@@ -228,9 +241,10 @@ class Mats:
         return mat
 
 
-def write_mesh(stage, path, corners, mat, colours=None, normals=None, collision=False):
+def write_mesh(stage, path, corners, mat, colours=None, normals=None, collision=False, layer_b=None):
     """corners: list of (STJ point, (u, v) with v down like the PCX, optional shade). Three corners per triangle,
-    not shared: the points are merged by position, UVs/shade/normals stay per face corner (faceVarying)."""
+    not shared: the points are merged by position, UVs/shade/normals stay per face corner (faceVarying).
+    layer_b: per corner ((u, v down) of a second texture layer, its weight 0..1), see two_layer_material.py."""
     # drop degenerate triangles (two corners at the same point, left by quads with repeated vertices): Blender reports
     # them as 'invalid face data' and they have no area anyway
     keep = [i for i in range(0, len(corners), 3) if len({c[0] for c in corners[i:i + 3]}) == 3]
@@ -239,6 +253,7 @@ def write_mesh(stage, path, corners, mat, colours=None, normals=None, collision=
         corners = [corners[j] for j in pick]
         colours = [colours[j] for j in pick] if colours else colours
         normals = [normals[j] for j in pick] if normals else normals
+        layer_b = [layer_b[j] for j in pick] if layer_b else layer_b
     index, pts, ids = {}, [], []
     for c in corners:
         k = c[0]
@@ -255,6 +270,11 @@ def write_mesh(stage, path, corners, mat, colours=None, normals=None, collision=
     pv = UsdGeom.PrimvarsAPI(m)
     st = pv.CreatePrimvar('st', Sdf.ValueTypeNames.TexCoord2fArray, UsdGeom.Tokens.faceVarying)
     st.Set(Vt.Vec2fArray([Gf.Vec2f(c[1][0], 1.0 - c[1][1]) for c in corners]))      # USD V points up
+    if layer_b:
+        st_b = pv.CreatePrimvar('stj_st_b', Sdf.ValueTypeNames.TexCoord2fArray, UsdGeom.Tokens.faceVarying)
+        st_b.Set(Vt.Vec2fArray([Gf.Vec2f(uv[0], 1.0 - uv[1]) for uv, _w in layer_b]))
+        weight = pv.CreatePrimvar('stj_weight', Sdf.ValueTypeNames.FloatArray, UsdGeom.Tokens.faceVarying)
+        weight.Set(Vt.FloatArray([w for _uv, w in layer_b]))
     if colours:
         dc = pv.CreatePrimvar('displayColor', Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.faceVarying)
         dc.Set(Vt.Vec3fArray([Gf.Vec3f(c, c, c) for c in colours]))
@@ -614,10 +634,10 @@ def convert(sq_path, out_dir):
     tex, mats = Textures(out), Mats(stage)
 
     # --- terrain: same grouping and triangulation as track_to_glb.convert -----------------------------------
-    groups = {}        # (texture: page number or baked page name, surface) -> [(corner points, uv 0..1, shade)]
+    groups = {}        # (texture: page number or mix material, surface) -> [(corners, uv 0..1, shade, layer B or None)]
     cards = {}         # the same, for the cut-out panels the game's car cannot hit (course_tiles.is_loose_card)
     pages = course_tiles.Pages(os.path.join(FILES, 'A'))
-    atlas = course_tiles.Atlas(pages)
+    mixes = {}         # mix material name -> (page A or None, page B, mode)
     border = course_tiles.ground_border(t['polys'], vs)
     sea_page, sea_azimuth = SEA.get(int(name[5:]), (None, 0.0))
     sea_foot = []      # where the cliff above the sea fades out
@@ -628,15 +648,23 @@ def convert(sq_path, out_dir):
         if not a and not b:
             continue                                   # no layer to see: the game draws nothing
         code = (a or b)[0]
-        baked = None
-        if course_tiles.needs_bake(a, b, weights, mode):   # two layers, or one faded, darkening or additive one
-            baked = atlas.add(a, b, weights, mode)
-        if baked:
-            tex_key, uv = baked
+
+        def fractions(layer):
+            pw, ph = page_size(layer[0] >> 4)
+            return [(u / pw, v / ph) for u, v in layer[1]]
+
+        second = None
+        # two layers, or one faded, darkening or additive one; without both pages the face keeps its one picture
+        if course_tiles.needs_bake(a, b, weights, mode) and all(
+                pages.get(x[0] >> 4) is not None for x in (a, b) if x):
+            page_a, page_b = a[0] >> 4 if a else None, b[0] >> 4
+            tex_key = two_layer_material.name_of(page_a, page_b, mode)
+            mixes[tex_key] = (page_a, page_b, mode)
+            uv = fractions(a or b)
+            second = list(zip(fractions(b), [w / 255.0 for w in weights]))
         else:
             layer = a or b
-            pw, ph = page_size(layer[0] >> 4)
-            tex_key, uv = layer[0] >> 4, [(u / pw, v / ph) for u, v in layer[1]]
+            tex_key, uv = layer[0] >> 4, fractions(layer)
         shade = [((p[5] >> (8 * k)) & 255) / 255.0 for k in range(4)]
         # surface profile: low byte of TEXTINFO+0x20 (slot byte +0x10); polygons flagged 0x1000 use profile 5
         surf = textinfo[code * 128 + 0x20] if 0 <= code < 16000 else 0
@@ -645,31 +673,30 @@ def convert(sq_path, out_dir):
         if sea_page is not None and not a and b[0] >> 4 == sea_page:
             sea_foot += [vs[p[1 + k]][:2] for k in range(4) if weights[k] == 0]
         into = cards if course_tiles.is_loose_card(p, vs, border, pages, a, b, weights, mode) else groups
-        into.setdefault((tex_key, min(surf, 13)), []).append((p[1:5], uv, shade))
-    baked_rel = {}
-    for page, image in atlas.images():
-        os.makedirs(tex.dir, exist_ok=True)
-        image.save(os.path.join(tex.dir, page + '.png'))
-        baked_rel[page] = 'textures/%s.png' % page
+        into.setdefault((tex_key, min(surf, 13)), []).append((p[1:5], uv, shade, second))
+    # atlas pages written by an earlier version of this converter: nothing refers to them any more
+    if os.path.isdir(tex.dir):
+        for old in os.listdir(tex.dir):
+            if re.fullmatch(r'blend(64|128|256)_\d\d\.png', old):
+                os.remove(os.path.join(tex.dir, old))
+
+    def page_rel(pid):
+        return tex.get(os.path.join(FILES, 'A', 'TX%04d.PCX' % pid))
+
     def write_terrain(into_stage, into_mats, scope, items):
         for (tid, sf), quads in sorted(items.items(), key=lambda kv: (str(kv[0][0]).zfill(12), kv[0][1])):
-            corners, colours = [], []
-            for idx, uv, sh in quads:
+            corners, colours, layer_b = [], [], []
+            for idx, uv, sh, second in quads:
                 # the game's two triangles (0,1,2) and (3,2,1), written counter-clockwise seen from +Z (normal up)
                 for tri in ((0, 2, 1), (3, 1, 2)):
                     for k in tri:
                         corners.append((vs[idx[k]], uv[k]))
                         colours.append(sh[k])
-            if tid in baked_rel:
+                        if second:
+                            layer_b.append(second[k])
+            if tid in mixes:
                 name_ = tid
-                mat = into_mats.get(tid, baked_rel[tid], alpha=True)
-                mat.GetPrim().SetCustomDataByKey('stj:baked', {
-                    'reason': 'the game blends texture layers by corner weights (alpha, gloss or additive)', 'tool': TOOL, 'tool_version': TOOL_VERSION,
-                    'source': 'RCX course face layers (tools/course_tiles.py)'})
-                mat.GetPrim().SetCustomDataByKey('x_rcx', {'recipe': json.dumps({
-                    'cell': 'per cell [layer A or null, layer B, B corner weights 0..255, mode]; a layer = [tile code '
-                            '(page = code >> 4), corner uv in page pixels (outside the page it repeats)]; mode: alpha = '
-                            'A(1-w)+Bw, gloss = A(1-Bw), add = A+Bw', 'cells': atlas.cells[tid]}, separators=(',', ':'))})
+                mat = into_mats.mix(tid, *mixes[tid], page_rel)
             else:
                 name_ = 'TX%04d' % tid
                 rel = tex.get(os.path.join(FILES, 'A', 'TX%04d.PCX' % tid))
@@ -680,7 +707,8 @@ def convert(sq_path, out_dir):
                     mat = into_mats.get('untextured', None, alpha=False, colour=(1.0, 1.0, 1.0))
                 else:
                     mat = into_mats.get(name_ if rel else 'missing_' + name_, rel, alpha=True)
-            write_mesh(into_stage, '%s/%s_S%d' % (scope, name_, sf), corners, mat, colours=colours)
+            write_mesh(into_stage, '%s/%s_S%d' % (scope, name_, sf), corners, mat, colours=colours,
+                       layer_b=layer_b or None)
 
     surf_used = {}
     for (tid, sf), quads in groups.items():
@@ -708,7 +736,9 @@ def convert(sq_path, out_dir):
         if not is_placed_object(p) or p[1] >= len(vs):
             continue
         slot = (p[0] >> 8) & 0xFF
-        if slot >= 64 or (slot >= 0x38 and p[6] == 16):
+        # slots 0x38 up are markers (checkpoints, cameras, lamps, sounds), not objects: a checkpoint keeps pace-note
+        # slots in bytes 0x19..0x1B, so the p[6] dword of one need not be 16 (RC2000 decomp, wiki/Course-files.md)
+        if slot >= 0x38:
             continue
         m = ld[320 + slot]
         path = model_path(m)
