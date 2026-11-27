@@ -8,6 +8,7 @@ Run from the repository root, with your copy of the game in it. Python 3.10+, `p
 | `car_to_svj.py` | **main**: cars -> SVJ 0.112 (+ GLB, USDZ) |
 | `course_tiles.py` | terrain texturing: the game's two texture layers and blend modes (and the baked atlas of the GLB) |
 | `two_layer_material.py` | STJ material of a two-layer face: original pages, MaterialX mix, one-layer fallback (nothing baked) |
+| `card_types.py` | what a see-through standing panel shows (tree line, branch, fence, sign...); an inferred per-tile table |
 | `object_contacts.py` | which placed objects are solid, and their STJ `scenery` prototypes |
 | `track.py`, `sqsl.py` | read a stage `CDAT00C.SQ` (SQSL decompressor, polygon records) |
 | `ro3.py`, `lwob.py`, `lwo2obj.py` | read RO3 runtime models and LightWave LWOB sources |

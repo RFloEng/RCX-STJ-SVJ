@@ -12,8 +12,9 @@ The mix is made on the stored (sRGB encoded) texels, as the game does, and only 
 Baked shadows (an INFERENCE, the game does not call them that): a `gloss` layer over a layer A only darkens it.  Counted
 over every stage, all 17,098 such faces use texture tiles that are used for nothing else, with the shapes of tree crowns,
 fences and bushes, nearer to standing panels and objects than other ground (docs/stj_baked_material_layers_proposal.md).
-Their materials get the interface input `inputs:x_rcx_baked_strength` (1 = as the game draws it, 0 = without the layer)
-and are listed in the mesh's `baked.x_rcx.material_layers`.  Gloss without a layer A is not covered.
+Declared as STJ 0.4 does it (§7.2): their materials get the interface input `inputs:stj_baked_strength` (1 = as the game
+draws it, 0 = without the layer) and are listed in the mesh's `baked.material_layers`, with basis `inferred`.  Gloss
+without a layer A is not covered.
 """
 from pxr import Gf, Sdf, UsdShade
 
@@ -23,8 +24,8 @@ RULE = {'alpha': 'alpha = w + aA(1-w); colour = (B w + A aA (1-w)) / alpha',
         'gloss': 'alpha = aA; colour = A (1 - B w)',
         'fade': 'alpha = w; colour = B'}
 
-# the interface input of a material with a baked shadow layer (x_rcx until STJ has a name of its own for it)
-STRENGTH = 'x_rcx_baked_strength'
+# the interface input of a material with a baked shadow layer (the STJ 0.4 name)
+STRENGTH = 'stj_baked_strength'
 EVIDENCE = ('second layer that only darkens, on texture tiles used for nothing else, with the shapes of tree crowns, '
             'fences and bushes and nearer to standing panels and objects than other ground; the game does not call it a shadow')
 
@@ -37,7 +38,7 @@ def is_baked_shadow(page_a, mode):
 
 
 def baked_layer(name, rel_b):
-    """The entry of a material in geometry.meshes[].baked.x_rcx.material_layers."""
+    """The entry of a material in geometry.meshes[].baked.material_layers."""
     return {'material': name, 'kind': 'shadow', 'input': STRENGTH,
             'layer': {'uri': rel_b, 'texcoord': 'stj_st_b', 'weight_primvar': 'stj_weight'},
             'op': 'darken', 'space': 'encoded', 'basis': 'inferred', 'note': EVIDENCE}

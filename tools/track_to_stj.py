@@ -1,4 +1,4 @@
-"""Convert an RCX track (LEVELS/LEVELxx/CDAT00C.SQ + LOCALDAT) to STJ (Standard Track JSON, v0.3) in OpenUSD.
+"""Convert an RCX track (LEVELS/LEVELxx/CDAT00C.SQ + LOCALDAT) to STJ (Standard Track JSON, v0.4) in OpenUSD.
 https://github.com/RFloEng/STJ-Standard-Track-Json
 
 usage: python track_to_stj.py <out_dir> <CDAT00C.SQ> [...]       (needs `pip install usd-core`)
@@ -61,6 +61,7 @@ from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, Vt
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from track import read_track
 import two_layer_material
+import card_types
 import course_ref
 import course_tiles
 import object_contacts
@@ -194,7 +195,7 @@ class Mats:
     def __init__(self, stage):
         self.stage = stage
         self.cache = {}
-        self.shadows = {}               # material name -> its baked.x_rcx.material_layers entry
+        self.shadows = {}               # material name -> its baked.material_layers entry
         UsdGeom.Scope.Define(stage, '/track/materials')
 
     def mix(self, name, page_a, page_b, mode, page_rel):
@@ -399,8 +400,15 @@ SURFACE_NAMES = {1: ('tarmac', 'asphalt'), 2: ('gravel', 'gravel'), 3: ('mud', '
                  12: ('snow gravel', 'snow'), 0: ('none', 'other'), 13: ('none', 'other')}
 
 
+def mesh_path(scope, name, surface, card_type):
+    """Cards are grouped by what they show, under panels_<type>, so each type can be hidden or replaced on its own."""
+    if card_type:
+        return '%s/panels_%s/%s_S%d_%s' % (scope, card_type, name, surface, card_type)
+    return '%s/%s_S%d' % (scope, name, surface)
+
+
 def surfaces_block(surf_used, keys):
-    """One surface per game profile in use, bound to the terrain meshes `keys` = [(mesh name, profile)]."""
+    """One surface per game profile in use, bound to the terrain meshes `keys` = [(mesh name, profile, card type)]."""
     prof = exe_surface_profiles()
     lib, bind = {}, []
     for k in sorted(surf_used):
@@ -418,8 +426,8 @@ def surfaces_block(surf_used, keys):
                 e['mf_scaling'] = {'LMUX': round(g / 120.0, 3), 'LMUY': round(g / 120.0, 3),
                                    '_est': 'grip_table[1] (set A, index 0) / 120 (profile 1, the highest); the game picks the entry by a per-car index 0..5 and blends sets A and B by a level-wide 0..1 value (0x43ba9e)'}
         lib['rcx_s%d' % k] = e
-    for mesh, sf in sorted(keys):
-        bind.append({'mesh_ref': 'stage', 'prim': '/track/ground/%s_S%d' % (mesh, sf), 'surface': 'rcx_s%d' % sf})
+    for mesh, sf, kind in sorted(keys):
+        bind.append({'mesh_ref': 'stage', 'prim': mesh_path('/track/ground', mesh, sf, kind), 'surface': 'rcx_s%d' % sf})
     return {'default': 'rcx_s%d' % max(surf_used, key=surf_used.get) if surf_used else 'rcx_s0', 'library': lib,
             'bindings': bind}
 
@@ -498,7 +506,7 @@ def environment_raw(ld, sky=None):
 def build_document(name, t, road, placed, textures, n_polys, surf_used, keys, env=None, mk=None, scenery=None):
     doc = {
         '_metadata': {
-            'specification': 'STJ', 'version': '0.3', 'coordinate_system': 'OpenDRIVE', 'units': 'SI',
+            'specification': 'STJ', 'version': '0.4', 'coordinate_system': 'OpenDRIVE', 'units': 'SI',
             'description': 'Rally Championship Xtreme stage %s, converted from the game files by the user' % name,
             'source_format': 'RCX LEVELS/%s (CDAT00C.SQ + LOCALDAT)' % name,
             'licence': {'redistributable': False, 'holder': 'original game content',
@@ -637,7 +645,8 @@ def convert(sq_path, out_dir):
     tex, mats = Textures(out), Mats(stage)
 
     # --- terrain: same grouping and triangulation as track_to_glb.convert -----------------------------------
-    groups = {}        # (texture: page number or mix material, surface) -> [(corners, uv 0..1, shade, layer B or None)]
+    # (texture: page number or mix material, surface, card type or '') -> [(corners, uv 0..1, shade, layer B or None)]
+    groups = {}
     cards = {}         # the same, for the cut-out panels the game's car cannot hit (course_tiles.is_loose_card)
     pages = course_tiles.Pages(os.path.join(FILES, 'A'))
     mixes = {}         # mix material name -> (page A or None, page B, mode)
@@ -676,7 +685,8 @@ def convert(sq_path, out_dir):
         if sea_page is not None and not a and b[0] >> 4 == sea_page:
             sea_foot += [vs[p[1 + k]][:2] for k in range(4) if weights[k] == 0]
         into = cards if course_tiles.is_loose_card(p, vs, border, pages, a, b, weights, mode) else groups
-        into.setdefault((tex_key, min(surf, 13)), []).append((p[1:5], uv, shade, second))
+        kind = card_types.card_type(p, vs, pages, a, b, weights, mode) or ''
+        into.setdefault((tex_key, min(surf, 13), kind), []).append((p[1:5], uv, shade, second))
     # atlas pages written by an earlier version of this converter: nothing refers to them any more
     if os.path.isdir(tex.dir):
         for old in os.listdir(tex.dir):
@@ -687,7 +697,7 @@ def convert(sq_path, out_dir):
         return tex.get(os.path.join(FILES, 'A', 'TX%04d.PCX' % pid))
 
     def write_terrain(into_stage, into_mats, scope, items):
-        for (tid, sf), quads in sorted(items.items(), key=lambda kv: (str(kv[0][0]).zfill(12), kv[0][1])):
+        for (tid, sf, kind), quads in sorted(items.items(), key=lambda kv: (str(kv[0][0]).zfill(12), kv[0][1:])):
             corners, colours, layer_b = [], [], []
             for idx, uv, sh, second in quads:
                 # the game's two triangles (0,1,2) and (3,2,1), written counter-clockwise seen from +Z (normal up)
@@ -710,11 +720,15 @@ def convert(sq_path, out_dir):
                     mat = into_mats.get('untextured', None, alpha=False, colour=(1.0, 1.0, 1.0))
                 else:
                     mat = into_mats.get(name_ if rel else 'missing_' + name_, rel, alpha=True)
-            write_mesh(into_stage, '%s/%s_S%d' % (scope, name_, sf), corners, mat, colours=colours,
-                       layer_b=layer_b or None)
+            if kind:        # a real group: Blender drops a prim without a type and its children move up a level
+                UsdGeom.Scope.Define(into_stage, '%s/panels_%s' % (scope, kind))
+            made = write_mesh(into_stage, mesh_path(scope, name_, sf, kind), corners, mat, colours=colours,
+                              layer_b=layer_b or None)
+            if kind:                    # collision is inherited from the scope above, as for any other terrain mesh
+                made.GetPrim().SetCustomDataByKey('x_rcx', {'card_type': kind, 'card_type_basis': 'inferred'})
 
     surf_used = {}
-    for (tid, sf), quads in groups.items():
+    for (tid, sf, _kind), quads in groups.items():
         surf_used[sf] = surf_used.get(sf, 0) + len(quads)
     write_terrain(stage, mats, '/track/ground', groups)
     cards_file = os.path.join(out, name + '_cards.usda')
@@ -805,7 +819,8 @@ def convert(sq_path, out_dir):
 
     road = build_road(t, sq_path)
     doc = build_document(name, t, road, placed, tex, len(t['polys']), surf_used,
-                         [(k if isinstance(k, str) else 'TX%04d' % k, sf) for k, sf in groups], environment_raw(ld, sky), level_markers(t, vs),
+                         [(k if isinstance(k, str) else 'TX%04d' % k, sf, kind) for k, sf, kind in groups],
+                         environment_raw(ld, sky), level_markers(t, vs),
                          (scenery_protos, scenery_sets))
     if cards:
         doc['geometry']['meshes'].append({
@@ -814,11 +829,24 @@ def convert(sq_path, out_dir):
         doc['x_rcx']['cards'] = {'faces': sum(map(len, cards.values())),
                                  'rule': 'standing see-through faces flagged not ground (0x80), off the edge of the ground: '
                                          'the game never tests the car against them'}
+    counts_by_type = {}
+    for file_id, items in (('stage', groups), ('cards', cards)):
+        for (_tid, _sf, kind), quads in items.items():
+            if kind:
+                entry = counts_by_type.setdefault(kind, {'stage': 0, 'cards': 0})
+                entry[file_id] += len(quads)
+    if counts_by_type:
+        doc['x_rcx']['card_types'] = {
+            'basis': 'inferred',
+            'rule': 'standing faces with holes in their picture, typed by their texture tile from a table made by '
+                    'looking at the tiles (tools/card_types.py); meshes under panels_<type>, customData x_rcx.card_type. '
+                    'faces: in the stage file (with collision) and in the cards file (without)',
+            'faces': {k: counts_by_type[k] for k in sorted(counts_by_type)}}
     # layers that look like baked shadows (inferred), listed beside each mesh's other baked light (two_layer_material)
     for entry in doc['geometry']['meshes']:
         found = {'stage': mats, 'cards': card_mats if cards else None}.get(entry['id'])
         if found and found.shadows:
-            entry['baked']['x_rcx'] = {'material_layers': [found.shadows[k] for k in sorted(found.shadows)]}
+            entry['baked']['material_layers'] = [found.shadows[k] for k in sorted(found.shadows)]
     water_file = os.path.join(out, name + '_water.usda')
     if os.path.exists(water_file):
         os.remove(water_file)

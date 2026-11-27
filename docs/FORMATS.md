@@ -78,10 +78,11 @@ the picture repeats every 32 m.
 
 **Baked shadows (inferred, not stated by the game).** All 17,098 gloss faces over a first layer use texture tiles that
 are used for nothing else on any stage's terrain; the shapes and where they lie are in
-`stj_baked_material_layers_proposal.md` §6. The STJ export keeps the layer and marks it: material input
-`inputs:x_rcx_baked_strength` (1 = as the game, 0 = layer A alone), `x_rcx.baked_kind = shadow`,
-`baked_basis = inferred`, and a list in `geometry.meshes[].baked.x_rcx.material_layers`. Removing it is the choice of the
-converter to the target engine. The 1,334 gloss faces with no first layer are not marked.
+`stj_baked_material_layers_proposal.md` §6. The STJ export keeps the layer and declares it as STJ 0.4 does (§7.2):
+material input `inputs:stj_baked_strength` (1 = as the game, 0 = layer A alone) and a list in
+`geometry.meshes[].baked.material_layers` with `kind: shadow`, `basis: inferred`; the material's `customData` `x_rcx`
+also says `baked_kind`, `baked_basis` and `baked_input`. Removing it is the choice of the converter to the target
+engine. The 1,334 gloss faces with no first layer are not marked.
 
 `tools/course_tiles.py` reads the two layers for both exporters. What they write differs:
 
@@ -130,6 +131,16 @@ profiles 0, 1, 2, 3, 7, 8. Profile names/classes are not in the data (tarmac-lik
   edge on the border of the ground and are less than 85% solid (the last two limits are the tool's choice): overhanging
   leaves and bushes that were invisible barriers. LEVEL21: see-through terrain triangles within 3 m of the road line at
   car height drop from 626 to 2.
+* **Card types (inferred; the game has no such thing).** A "card" here is a face steeper than 70 degrees whose picture
+  has holes (less than 95% solid), with or without collision. `track_to_stj.py` groups them by what the picture shows:
+  treeline, tree, branch, undergrowth, fence, barrier, sign, banner, cable, structure, other. The type comes from a
+  table of the 144 tiles that occur this way, made by looking at them (`tools/card_types.py`); the first layer's tile
+  decides. `TEXTINFO` byte `+0x18` agrees for most tiles (2 grass and hedges, 5 tree walls, 6 fences, 7 signs) but 0 is
+  a mix and some grass tiles carry 6, so it is not used. In the STJ the meshes are under
+  `/track/ground/panels_<type>` (collision, as before) and `/track/cards/panels_<type>` (visual only), each with
+  `customData x_rcx {card_type, card_type_basis = 'inferred'}`; the document has the counts in `x_rcx.card_types`.
+  The type changes neither collision nor surface. The sagging lines of pages 183, 184 and 392, tile 3 (`cable`)
+  are standing panels, not shadows on the ground.
 
 After loading, the game swaps one tile code on some stages (`FUN_0043989a`, which reads the stage number): `0x2f82→0x2fd0` on stages 32/34/36,
 `0x2f91→0x2fe0` on 52/54/56, `0x2f72→0x2fd2` on 61/63/65 and `0x2f71→0x2fd1` on 62/64/66 (first match only, in the 255-entry tile list). The exporter does the same (`TILE_SWAP`).
