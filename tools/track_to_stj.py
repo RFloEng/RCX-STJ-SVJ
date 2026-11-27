@@ -194,6 +194,7 @@ class Mats:
     def __init__(self, stage):
         self.stage = stage
         self.cache = {}
+        self.shadows = {}               # material name -> its baked.x_rcx.material_layers entry
         UsdGeom.Scope.Define(stage, '/track/materials')
 
     def mix(self, name, page_a, page_b, mode, page_rel):
@@ -203,6 +204,8 @@ class Mats:
             rel_a = None if page_a is None else page_rel(page_a)
             mat = self.get(name, rel_a or rel_b, alpha=True)
             two_layer_material.add_mix(self.stage, mat, page_a, page_b, rel_a, rel_b, mode)
+            if two_layer_material.is_baked_shadow(page_a, mode):
+                self.shadows[name] = two_layer_material.baked_layer(name, rel_b)
         return self.cache[name]
 
     def get(self, name, tex_rel, alpha, colour=FALLBACK):
@@ -723,7 +726,8 @@ def convert(sq_path, out_dir):
         UsdGeom.SetStageMetersPerUnit(card_stage, 1.0)
         card_stage.SetDefaultPrim(UsdGeom.Xform.Define(card_stage, '/track').GetPrim())
         UsdGeom.Scope.Define(card_stage, '/track/cards')
-        write_terrain(card_stage, Mats(card_stage), '/track/cards', cards)
+        card_mats = Mats(card_stage)
+        write_terrain(card_stage, card_mats, '/track/cards', cards)
         card_stage.GetRootLayer().Save()
 
     # --- placed objects (see track_to_glb.place_objects) -------------------------------------------------------
@@ -810,6 +814,11 @@ def convert(sq_path, out_dir):
         doc['x_rcx']['cards'] = {'faces': sum(map(len, cards.values())),
                                  'rule': 'standing see-through faces flagged not ground (0x80), off the edge of the ground: '
                                          'the game never tests the car against them'}
+    # layers that look like baked shadows (inferred), listed beside each mesh's other baked light (two_layer_material)
+    for entry in doc['geometry']['meshes']:
+        found = {'stage': mats, 'cards': card_mats if cards else None}.get(entry['id'])
+        if found and found.shadows:
+            entry['baked']['x_rcx'] = {'material_layers': [found.shadows[k] for k in sorted(found.shadows)]}
     water_file = os.path.join(out, name + '_water.usda')
     if os.path.exists(water_file):
         os.remove(water_file)

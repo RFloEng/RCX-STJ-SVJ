@@ -8,6 +8,12 @@ course_tiles.py explains what the game does.  Nothing is baked: the face keeps t
   * the material's customData `x_rcx` says the same for a converter that does not read MaterialX:
     {shader: "RCX two-layer face, mode <mode>" (the last word is the mode), rule, page_a (-1 = no A), page_b}.
 The mix is made on the stored (sRGB encoded) texels, as the game does, and only the result is turned into linear light.
+
+Baked shadows (an INFERENCE, the game does not call them that): a `gloss` layer over a layer A only darkens it.  Counted
+over every stage, all 17,098 such faces use texture tiles that are used for nothing else, with the shapes of tree crowns,
+fences and bushes, nearer to standing panels and objects than other ground (docs/stj_baked_material_layers_proposal.md).
+Their materials get the interface input `inputs:x_rcx_baked_strength` (1 = as the game draws it, 0 = without the layer)
+and are listed in the mesh's `baked.x_rcx.material_layers`.  Gloss without a layer A is not covered.
 """
 from pxr import Gf, Sdf, UsdShade
 
@@ -17,8 +23,24 @@ RULE = {'alpha': 'alpha = w + aA(1-w); colour = (B w + A aA (1-w)) / alpha',
         'gloss': 'alpha = aA; colour = A (1 - B w)',
         'fade': 'alpha = w; colour = B'}
 
+# the interface input of a material with a baked shadow layer (x_rcx until STJ has a name of its own for it)
+STRENGTH = 'x_rcx_baked_strength'
+EVIDENCE = ('second layer that only darkens, on texture tiles used for nothing else, with the shapes of tree crowns, '
+            'fences and bushes and nearer to standing panels and objects than other ground; the game does not call it a shadow')
+
 F, C3, C4 = Sdf.ValueTypeNames.Float, Sdf.ValueTypeNames.Color3f, Sdf.ValueTypeNames.Color4f
 V2, STR, FILE = Sdf.ValueTypeNames.Float2, Sdf.ValueTypeNames.String, Sdf.ValueTypeNames.Asset
+
+
+def is_baked_shadow(page_a, mode):
+    return page_a is not None and mode == 'gloss'
+
+
+def baked_layer(name, rel_b):
+    """The entry of a material in geometry.meshes[].baked.x_rcx.material_layers."""
+    return {'material': name, 'kind': 'shadow', 'input': STRENGTH,
+            'layer': {'uri': rel_b, 'texcoord': 'stj_st_b', 'weight_primvar': 'stj_weight'},
+            'op': 'darken', 'space': 'encoded', 'basis': 'inferred', 'note': EVIDENCE}
 
 
 def name_of(page_a, page_b, mode):
@@ -37,7 +59,7 @@ class _Graph:
         sh.CreateIdAttr(nid)
         for key, (typ, val) in inputs.items():
             inp = sh.CreateInput(key, typ)
-            if isinstance(val, UsdShade.Output):
+            if isinstance(val, (UsdShade.Output, UsdShade.Input)):
                 inp.ConnectToSource(val)
             else:
                 inp.Set(val)
@@ -73,6 +95,11 @@ def add_mix(stage, mat, page_a, page_b, rel_a, rel_b, mode):
     cb, ab = g.image(rel_b, 'stj_st_b')
     weight = g.node('ND_geompropvalue_float', F, {'geomprop': (STR, 'stj_weight')})
     wb = g.two('multiply', 'float', weight, ab)
+    shadow = is_baked_shadow(page_a, mode)
+    if shadow:
+        strength = mat.CreateInput(STRENGTH, F)
+        strength.Set(1.0)
+        wb = g.two('multiply', 'float', wb, strength)
     if page_a is None:
         colour, alpha = cb, wb
     else:
@@ -92,5 +119,8 @@ def add_mix(stage, mat, page_a, page_b, rel_a, rel_b, mode):
     surface = g.node('ND_open_pbr_surface_surfaceshader', Sdf.ValueTypeNames.Token,
                      {'base_color': (C3, linear), 'specular_roughness': (F, 1.0), 'geometry_opacity': (F, cut)})
     mat.CreateSurfaceOutput('mtlx').ConnectToSource(surface)
-    mat.GetPrim().SetCustomDataByKey('x_rcx', {'shader': 'RCX two-layer face, mode ' + mode, 'rule': RULE[mode],
-                                               'page_a': -1 if page_a is None else page_a, 'page_b': page_b})
+    data = {'shader': 'RCX two-layer face, mode ' + mode, 'rule': RULE[mode],
+            'page_a': -1 if page_a is None else page_a, 'page_b': page_b}
+    if shadow:          # for a converter that reads only this: without the layer the face is layer A, alpha included
+        data.update({'baked_kind': 'shadow', 'baked_basis': 'inferred', 'baked_input': STRENGTH})
+    mat.GetPrim().SetCustomDataByKey('x_rcx', data)

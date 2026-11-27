@@ -76,6 +76,13 @@ RC2000 decomp): the corner UVs do not come from the tile but from the corner's p
 `(x, z) * 2^((byte & 3) + 2) / 256`, less the whole pages of corner 0. With the value 1 (all grass tiles of TX363/364/377)
 the picture repeats every 32 m.
 
+**Baked shadows (inferred, not stated by the game).** All 17,098 gloss faces over a first layer use texture tiles that
+are used for nothing else on any stage's terrain; the shapes and where they lie are in
+`stj_baked_material_layers_proposal.md` §6. The STJ export keeps the layer and marks it: material input
+`inputs:x_rcx_baked_strength` (1 = as the game, 0 = layer A alone), `x_rcx.baked_kind = shadow`,
+`baked_basis = inferred`, and a list in `geometry.meshes[].baked.x_rcx.material_layers`. Removing it is the choice of the
+converter to the target engine. The 1,334 gloss faces with no first layer are not marked.
+
 `tools/course_tiles.py` reads the two layers for both exporters. What they write differs:
 
 * **STJ** (`track_to_stj.py`, STJ spec 7.7: a converter does not bake materials): the face keeps the game's own pages.
